@@ -1,29 +1,29 @@
-﻿using Microsoft.Extensions.Logging;
+﻿using System.Collections.Concurrent;
+using System.Runtime.CompilerServices;
+using Microsoft.Extensions.Logging;
 
 namespace Synapse.Server.Services;
 
 public interface ITimeoutService
 {
-    public void Timeout(Action action, int milliseconds);
+    public void Timeout(Action action, int milliseconds, [CallerMemberName] string memberName = "");
 }
 
 public class TimeoutService(ILogger<RoleService> log) : ITimeoutService
 {
-    public bool? _doTimeout;
+    public static readonly ConcurrentDictionary<string, bool> _timeoutFinished = new();
 
-    public void Timeout(Action action, int milliseconds)
+    public void Timeout(Action action, int milliseconds, string memberName = "")
     {
-        if (_doTimeout.HasValue)
+        if (_timeoutFinished.AddOrUpdate(memberName, false, (_, _) => true))
         {
-            _doTimeout = true;
             return;
         }
 
-        _doTimeout = false;
         try
         {
             action();
-            _ = TimeoutTask(action, milliseconds);
+            _ = TimeoutTask(memberName, action, milliseconds);
         }
         catch (Exception e)
         {
@@ -31,10 +31,10 @@ public class TimeoutService(ILogger<RoleService> log) : ITimeoutService
         }
     }
 
-    private async Task TimeoutTask(Action action, int milliseconds)
+    private async Task TimeoutTask(string index, Action action, int milliseconds)
     {
         await Task.Delay(milliseconds);
-        if (_doTimeout == true)
+        if (_timeoutFinished.TryRemove(index, out bool timeout) && timeout)
         {
             try
             {
@@ -45,7 +45,5 @@ public class TimeoutService(ILogger<RoleService> log) : ITimeoutService
                 log.LogCritical(e, "An exception occurred while trying to finish timeout");
             }
         }
-
-        _doTimeout = null;
     }
 }
