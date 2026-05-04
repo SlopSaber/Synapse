@@ -1,5 +1,6 @@
 using Synapse.Listing.Services;
 
+Console.WriteLine(Directory.GetCurrentDirectory());
 WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
@@ -19,7 +20,7 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-app.UseStaticFiles();
+////app.UseStaticFiles();
 
 ////app.UseHttpsRedirection();
 
