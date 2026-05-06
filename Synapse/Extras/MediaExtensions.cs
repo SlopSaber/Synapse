@@ -160,7 +160,7 @@ internal static class MediaExtensions
     internal static void Purge(this DirectoryInfo directory)
     {
         // cleanup
-        if (!directory.Exists)
+        if (!Directory.Exists(directory.FullName))
         {
             return;
         }

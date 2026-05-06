@@ -141,6 +141,7 @@ internal class ListingManager : IInitializable
             ListingFoundBacking?.Invoke(Listing);
             if (_config.LastEvent.Title != listing.Title)
             {
+                MapDownloadingManager.PurgeCache();
                 _config.LastEvent = new EventInfo
                 {
                     Title = listing.Title

@@ -48,6 +48,7 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
 #if !PRE_V1_37_1
         BeatmapLevelsModel beatmapLevelsModel,
 #endif
+        Config config,
         CancellationTokenManager cancellationTokenManager,
         [InjectOptional] SongCoreLoader? songCoreLoader)
     {
@@ -62,7 +63,19 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
         networkManager.MapUpdated += OnMapUpdated;
         networkManager.Closed += OnClosed;
 
-        _tmp = new DirectoryInfo(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString()));
+        string? oldTemp = config.Temp;
+        if (!string.IsNullOrEmpty(oldTemp))
+        {
+            DirectoryInfo oldTempDirectory = new(Path.Combine(Path.GetTempPath(), oldTemp));
+            if (oldTempDirectory.Exists)
+            {
+                oldTempDirectory.Delete(true);
+            }
+        }
+
+        string guid = Guid.NewGuid().ToString();
+        config.Temp = guid;
+        _tmp = new DirectoryInfo(Path.Combine(Path.GetTempPath(), guid));
         _tmp.Create();
 
         DirectoryInfo directory = new(_mapFolder);
@@ -72,8 +85,6 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
         {
             File.WriteAllText(jokeFile.FullName, "you wouldn't happen to be trying to steal maps, would you?");
         }
-
-        Application.quitting += OnApplicationQuitting;
     }
 
     public event Action<string>? ProgressUpdated;
@@ -117,8 +128,7 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
     {
         _networkManager.MapUpdated -= OnMapUpdated;
         _networkManager.Closed -= OnClosed;
-        Application.quitting -= OnApplicationQuitting;
-        _tmp.Delete(true);
+        DeleteTemp();
     }
 
     public void Tick()
@@ -143,14 +153,22 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
         ProgressUpdated?.Invoke(text);
     }
 
+    internal static void PurgeCache()
+    {
+        new DirectoryInfo(_mapFolder).Purge();
+    }
+
     internal void Cancel()
     {
         _cancellationTokenManager.Cancel();
     }
 
-    private void OnApplicationQuitting()
+    private void DeleteTemp()
     {
-        _tmp.Delete(true);
+        if (Directory.Exists(_tmp.FullName))
+        {
+            _tmp.Delete(true);
+        }
     }
 
     private void OnMapUpdated(int index, Map map)
@@ -187,6 +205,7 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
 
     private void OnClosed()
     {
+        DeleteTemp();
         _cancellationTokenManager.Cancel();
     }
 
@@ -217,6 +236,8 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
                 bool decrypt = !string.IsNullOrEmpty(download.Key);
                 using FileStream fs = new(decrypt ? cacheAes.FullName : cacheZip.FullName, FileMode.CreateNew);
                 await stream.CopyToAsync(fs);
+                cacheZip.Refresh();
+                cacheAes.Refresh();
             }
 
             if (cacheAes.Exists)

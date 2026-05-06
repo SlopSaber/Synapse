@@ -29,6 +29,8 @@ public class Config
 
     public bool ShowEliminated { get; set; } = true;
 
+    public virtual string? Temp { get; set; } = string.Empty;
+
     public string Url { get; set; } = "https://synapse.totalbs.dev/api/v1/directory";
 
     public virtual void Changed()
