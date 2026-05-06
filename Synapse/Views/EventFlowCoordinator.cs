@@ -551,6 +551,12 @@ internal class EventFlowCoordinator : FlowCoordinator
             TransitionDidStart();
             _mapDownloadingManager.MapDownloadedOnce += n =>
             {
+                if (topViewController != _lobbyNavigationViewController)
+                {
+                    TransitionDidFinish();
+                    return;
+                }
+
                 _transitionFinished.Clear();
                 try
                 {
