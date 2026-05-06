@@ -108,4 +108,6 @@ public record Download
     public string Url { get; init; } = string.Empty;
 
     public string Hash { get; init; } = string.Empty;
+
+    public string? Key { get; init; }
 }

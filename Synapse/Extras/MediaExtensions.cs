@@ -16,21 +16,16 @@ internal static class MediaExtensions
 {
     private static readonly ConcurrentDictionary<string, Sprite> _spriteCache = new();
 
-    internal static async Task DownloadAndSave(
+    internal static async Task<MemoryStream> DownloadHash(
         string url,
         string hash,
-        string unzipPath,
         Action<float>? progress,
-        Action? unzipping,
-        Action<float>? unzipProgress,
         CancellationToken token)
     {
         using UnityWebRequest www = UnityWebRequest.Get(url);
         await www.SendAndVerify(progress, token);
 
-        unzipping?.Invoke();
-
-        using MemoryStream stream = new(www.downloadHandler.data);
+        MemoryStream stream = new(www.downloadHandler.data);
 
         using MD5 md5 = MD5.Create();
         string computed = BitConverter
@@ -42,23 +37,61 @@ internal static class MediaExtensions
             throw new InvalidOperationException($"MD5 mismatch, expected: [{hash}], calculated: [{computed}].");
         }
 
-        using ZipArchive zip = new(stream, ZipArchiveMode.Read, false);
-        ZipArchiveEntry[] entries = zip.Entries.ToArray();
-        for (int j = 0; j < entries.Length; j++)
+        stream.Position = 0;
+        return stream;
+    }
+
+    internal static Task Unzip(
+        Stream stream,
+        string unzipPath,
+        Action<float>? unzipProgress)
+    {
+        return Task.Run(() =>
         {
-            unzipProgress?.Invoke((float)j / entries.Length);
-            ZipArchiveEntry entry = entries[j];
-            string fullPath = Path.GetFullPath(Path.Combine(unzipPath, entry.FullName));
-            if (Path.GetFileName(fullPath).Length == 0)
+            using ZipArchive zip = new(stream, ZipArchiveMode.Read, false);
+            ZipArchiveEntry[] entries = zip.Entries.ToArray();
+            for (int j = 0; j < entries.Length; j++)
             {
-                Directory.CreateDirectory(fullPath);
+                unzipProgress?.Invoke((float)j / entries.Length);
+                ZipArchiveEntry entry = entries[j];
+                string fullPath = Path.GetFullPath(Path.Combine(unzipPath, entry.FullName));
+                if (Path.GetFileName(fullPath).Length == 0)
+                {
+                    Directory.CreateDirectory(fullPath);
+                }
+                else
+                {
+                    Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
+                    entry.ExtractToFile(fullPath, true);
+                }
             }
-            else
+        });
+    }
+
+    internal static async Task<CryptoStream> Decrypt(Stream stream, string key)
+    {
+        using Aes aes = Aes.Create();
+        byte[] iv = new byte[aes.IV.Length];
+        int numBytesToRead = aes.IV.Length;
+        int numBytesRead = 0;
+        while (numBytesToRead > 0)
+        {
+            int n = await stream.ReadAsync(iv, numBytesRead, numBytesToRead);
+            if (n == 0)
             {
-                Directory.CreateDirectory(Path.GetDirectoryName(fullPath)!);
-                entry.ExtractToFile(fullPath, true);
+                break;
             }
+
+            numBytesRead += n;
+            numBytesToRead -= n;
         }
+
+        byte[] hex = Enumerable
+            .Range(0, key.Length)
+            .Where(x => x % 2 == 0)
+            .Select(x => Convert.ToByte(key.Substring(x, 2), 16))
+            .ToArray();
+        return new CryptoStream(stream, aes.CreateDecryptor(hex, iv), CryptoStreamMode.Read);
     }
 
     internal static Sprite GetEmbeddedResourceSprite(string path)

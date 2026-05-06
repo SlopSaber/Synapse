@@ -124,14 +124,16 @@ internal class EventModsDownloadingViewController : EventDownloadingViewControll
             int iteration = i;
             try
             {
-                await MediaExtensions.DownloadAndSave(
+                using MemoryStream stream = await MediaExtensions.DownloadHash(
                     url,
                     mod.Hash,
-                    unzipPath,
                     n => DownloadProgress = (iteration + (n * 0.5f)) / count,
-                    () => DownloadText = $"Unzipping {mod.Id}... ({iteration + 1}/{count})",
-                    n => DownloadProgress = (iteration + 0.5f + (n * 0.5f)) / count,
                     token);
+                DownloadText = $"Unzipping {mod.Id}... ({iteration + 1}/{count})";
+                await MediaExtensions.Unzip(
+                    stream,
+                    unzipPath,
+                    n => DownloadProgress = (iteration + 0.5f + (n * 0.5f)) / count);
             }
             catch (Exception e)
             {

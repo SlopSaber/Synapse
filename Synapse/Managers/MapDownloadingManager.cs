@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using IPA.Utilities.Async;
@@ -29,7 +30,7 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
 #endif
     private readonly CancellationTokenManager _cancellationTokenManager;
     private readonly SongCoreLoader? _songCoreLoader;
-    private readonly DirectoryInfo _directory;
+    private readonly DirectoryInfo _tmp;
 
     private string _lastSent = string.Empty;
     private string? _error;
@@ -58,10 +59,21 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
 #endif
         _cancellationTokenManager = cancellationTokenManager;
         _songCoreLoader = songCoreLoader;
-        _directory = new DirectoryInfo(_mapFolder);
-        _directory.Purge();
         networkManager.MapUpdated += OnMapUpdated;
         networkManager.Closed += OnClosed;
+
+        _tmp = new DirectoryInfo(Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString()));
+        _tmp.Create();
+
+        DirectoryInfo directory = new(_mapFolder);
+        directory.Create();
+        FileInfo jokeFile = new(Path.Combine(directory.FullName, "README.txt"));
+        if (!jokeFile.Exists)
+        {
+            File.WriteAllText(jokeFile.FullName, "you wouldn't happen to be trying to steal maps, would you?");
+        }
+
+        Application.quitting += OnApplicationQuitting;
     }
 
     public event Action<string>? ProgressUpdated;
@@ -105,7 +117,8 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
     {
         _networkManager.MapUpdated -= OnMapUpdated;
         _networkManager.Closed -= OnClosed;
-        _directory.Purge();
+        Application.quitting -= OnApplicationQuitting;
+        _tmp.Delete(true);
     }
 
     public void Tick()
@@ -135,13 +148,17 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
         _cancellationTokenManager.Cancel();
     }
 
+    private void OnApplicationQuitting()
+    {
+        _tmp.Delete(true);
+    }
+
     private void OnMapUpdated(int index, Map map)
     {
         MapDownloadedOnceBacking = null;
         _beatmapLevel = null;
 
         string mapName = Path.GetInvalidFileNameChars().Aggregate(map.Name, (current, c) => current.Replace(c, '_'));
-        string path = $"{_mapFolder}{Path.DirectorySeparatorChar}{mapName}";
         CancellationToken token = _cancellationTokenManager.Reset();
         UnityMainThreadTaskScheduler.Factory.StartNew(
             async () =>
@@ -151,7 +168,8 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
                 {
                     try
                     {
-                        await Download(index, map, path, token);
+                        _tmp.Purge();
+                        await Download(index, map, mapName, token);
                         return;
                     }
                     catch (TaskCanceledException)
@@ -172,11 +190,15 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
         _cancellationTokenManager.Cancel();
     }
 
-    private async Task Download(int index, Map map, string path, CancellationToken token)
+    private async Task Download(int index, Map map, string mapName, CancellationToken token)
     {
         _error = null;
         _lastProgress = 0;
         _downloadProgress = 0;
+        string unzipPath = _tmp.FullName;
+        string path = Path.Combine(_mapFolder, mapName);
+        FileInfo cacheAes = new(path + ".aes");
+        FileInfo cacheZip = new(path + ".zip");
         try
         {
             Download download =
@@ -184,33 +206,52 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
                 throw new InvalidOperationException($"No download found for game version [{Plugin.GameVersion}].");
             string url = download.Url;
 
-            DirectoryInfo directory = new(path);
-            if (directory.Exists)
+            if (!cacheAes.Exists && !cacheZip.Exists)
             {
-                directory.Delete(true);
+                _log.Debug($"Attempting to download [{map.Name}] from [{url}]");
+                using MemoryStream stream = await MediaExtensions.DownloadHash(
+                    url,
+                    download.Hash,
+                    n => _downloadProgress = n * 0.95f,
+                    token);
+                bool decrypt = !string.IsNullOrEmpty(download.Key);
+                using FileStream fs = new(decrypt ? cacheAes.FullName : cacheZip.FullName, FileMode.CreateNew);
+                await stream.CopyToAsync(fs);
             }
 
-            _log.Debug($"Attempting to download [{map.Name}] from [{url}]");
-            await MediaExtensions.DownloadAndSave(
-                url,
-                download.Hash,
-                path,
-                n => _downloadProgress = n * 0.95f,
-                null,
-                n => _downloadProgress = 0.95f + (n * 0.02f),
-                token);
+            if (cacheAes.Exists)
+            {
+                if (download.Key == null)
+                {
+                    throw new InvalidOperationException($"[{map.Name}] was encrypted but no key provided.");
+                }
+
+                _log.Debug($"Decrypting [{map.Name}]");
+                using FileStream stream = new(cacheAes.FullName, FileMode.Open);
+                using CryptoStream cryptoStream = await MediaExtensions.Decrypt(stream, download.Key);
+                await MediaExtensions.Unzip(cryptoStream, _tmp.FullName, n => _downloadProgress = 0.95f + (n * 0.02f));
+            }
+            else if (cacheZip.Exists)
+            {
+                using FileStream stream = new(cacheZip.FullName, FileMode.Open);
+                await MediaExtensions.Unzip(stream, _tmp.FullName, n => _downloadProgress = 0.95f + (n * 0.02f));
+            }
+            else
+            {
+                throw new InvalidOperationException($"Could not find [{map.Name}] in cache.");
+            }
 
             _downloadProgress = 0.98f;
 #if !PRE_V1_37_1
             BeatmapLevel beatmapLevel;
             if (_songCoreLoader != null)
             {
-                beatmapLevel = _songCoreLoader.Load(path);
+                beatmapLevel = _songCoreLoader.Load(unzipPath);
             }
             else
             {
                 CustomLevelFolderInfo? customLevelFolderInfo =
-                    await FileSystemCustomLevelProvider.LoadCustomLevelFolderInfoAsync(path, token) ??
+                    await FileSystemCustomLevelProvider.LoadCustomLevelFolderInfoAsync(unzipPath, token) ??
                     throw new InvalidOperationException("Failed to get CustomLevelFolderInfo.");
 
                 (BeatmapLevel, CustomLevelLoader.LoadedSaveData) tuple =
@@ -247,14 +288,14 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
             CustomPreviewBeatmapLevel beatmapLevel;
             if (_songCoreLoader != null)
             {
-                beatmapLevel = _songCoreLoader.Load(path);
+                beatmapLevel = _songCoreLoader.Load(unzipPath);
             }
             else
             {
                 StandardLevelInfoSaveData infoSaveData =
-                    await _customLevelLoader.LoadCustomLevelInfoSaveDataAsync(path, token);
+                    await _customLevelLoader.LoadCustomLevelInfoSaveDataAsync(unzipPath, token);
                 beatmapLevel = await _customLevelLoader.LoadCustomPreviewBeatmapLevelAsync(
-                    path,
+                    unzipPath,
                     infoSaveData,
                     token);
             }
@@ -302,7 +343,9 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
         {
             _log.Error($"Error downloading map [{map.Name}]\n{e}");
             _error = "ERROR!";
-            _directory.Purge();
+            File.Delete(cacheAes.FullName);
+            File.Delete(cacheZip.FullName);
+            _tmp.Purge();
             throw;
         }
     }

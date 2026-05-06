@@ -192,8 +192,9 @@ Server appsettings:
           },
           {
             "GameVersion": "1.34.2,1.37.1,1.39.1,1.40.0",
-            "Url": "https://localhost:5033/maps/Breezer_2021_2c170c1.zip",
-            "Hash": "2c170c14544b25b055029d2ca67b932c"
+            "Url": "https://localhost:5033/maps/Breezer_2021_2c170c1.aes",
+            "Hash": "2c170c14544b25b055029d2ca67b932c",
+            "Key": "66B85F44B087F8474E7B1183FA3365A0CECE3B9DA7E09D42407A934E26D2F530" // optional key to decrypt AES-256 encrypted zips
           }
         ]
       }
