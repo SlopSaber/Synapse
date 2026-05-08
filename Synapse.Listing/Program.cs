@@ -19,7 +19,15 @@ if (app.Environment.IsDevelopment())
     app.UseSwaggerUI();
 }
 
-////app.UseStaticFiles();
+ConfigurationManager config = builder.Configuration;
+if (config.GetValue<bool>("StaticFiles:Enabled"))
+{
+    StaticFileOptions options = new();
+    config.Bind("StaticFiles", options);
+    app.Logger.LogInformation("Serving static files from [{EnvironmentWebRootPath}]", app.Environment.WebRootPath);
+    app.UseStaticFiles(options);
+
+}
 
 ////app.UseHttpsRedirection();
 
