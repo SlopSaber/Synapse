@@ -16,7 +16,7 @@ public sealed class PacketBuilder : IDisposable
         LargeBufferMultiple = 1024 * 1024,
         MaximumBufferSize = 16 * 1024 * 1024,
         MaximumLargePoolFreeBytes = 16 * 1024 * 1024 * 4,
-        MaximumSmallPoolFreeBytes = 100 * 1024,
+        MaximumSmallPoolFreeBytes = 100 * 1024
     });
 #endif
 

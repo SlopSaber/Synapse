@@ -5,7 +5,6 @@ using Serilog;
 using Serilog.Formatting.Compact;
 using Serilog.Sinks.SystemConsole.Themes;
 using Synapse.Server.Clients;
-using Synapse.Server.Extras;
 using Synapse.Server.Services;
 using Synapse.Server.Stages;
 using ListenerService = Synapse.Server.Services.ListenerService;

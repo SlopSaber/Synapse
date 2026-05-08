@@ -13,7 +13,7 @@ public enum Permission
 [UsedImplicitly(ImplicitUseTargetFlags.Members)]
 public record SerializedRoleUser : SerializedUser
 {
-    public IReadOnlyList<string> Roles { get; init; } = Array.Empty<string>();
+    public IReadOnlyList<string> Roles { get; init; } = [];
 
     public override string ToString()
     {

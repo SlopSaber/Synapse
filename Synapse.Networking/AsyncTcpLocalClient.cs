@@ -64,7 +64,11 @@ public class AsyncTcpLocalClient : AsyncTcpClient
 
                 reconnectTry = 0;
 
+#if NET
+                await using NetworkStream stream = new(socket);
+#else
                 using NetworkStream stream = new(socket);
+#endif
                 Stream = stream;
                 await ReadAsync(token);
             }

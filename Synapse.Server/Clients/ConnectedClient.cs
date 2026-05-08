@@ -270,7 +270,7 @@ public class ConnectedClient(
                 string gameVersion = reader.ReadString();
                 string listingGuid = reader.ReadString();
 
-                string sanitized = StringUtils.Sanitize(username);
+                string sanitized = username.Sanitize();
 
                 // we'll just make sure nothing is too sus
                 if (string.IsNullOrWhiteSpace(id) ||
@@ -353,7 +353,7 @@ public class ConnectedClient(
                     }
 
                     case ServerOpcode.SetChatter:
-                        if (RateLimiter.RateLimit(this, 4, 5000, ServerOpcode.SetChatter.ToString()))
+                        if (RateLimiter.RateLimit(this, 4, 5000, nameof(ServerOpcode.SetChatter)))
                         {
                             await SendRefusal("Too many requests");
                             break;
@@ -385,7 +385,7 @@ public class ConnectedClient(
                             break;
                         }
 
-                        if (RateLimiter.RateLimit(this, 20, 10000, ServerOpcode.SetChatter.ToString()))
+                        if (RateLimiter.RateLimit(this, 20, 10000, nameof(ServerOpcode.SetChatter)))
                         {
                             await SendPriorityServerMessage("Too many messages, slow down!");
                             break;

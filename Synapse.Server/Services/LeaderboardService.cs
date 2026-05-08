@@ -292,7 +292,7 @@ public class LeaderboardService : ILeaderboardService
             PlayerScoreIndex = leaderboardSpecialIndex,
             Scores = scores,
             AliveCount = _sortedScores[division][index].Count,
-            ScoreCount = _sortedAllScores[division][index].Count,
+            ScoreCount = _sortedAllScores[division][index].Count
         };
 
         await client.Send(

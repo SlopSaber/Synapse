@@ -3,7 +3,6 @@ using System.Collections.Immutable;
 using System.Diagnostics.CodeAnalysis;
 using JetBrains.Annotations;
 using Microsoft.Extensions.Logging;
-using Synapse.Server.Extras;
 using Synapse.Server.Models;
 
 namespace Synapse.Server.Services;

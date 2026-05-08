@@ -1,6 +1,5 @@
 ﻿using System.Collections.Concurrent;
 using Microsoft.Extensions.Logging;
-using Synapse.Server.Extras;
 using Synapse.Server.Models;
 
 namespace Synapse.Server.Services;

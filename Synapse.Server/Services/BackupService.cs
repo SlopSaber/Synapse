@@ -1,6 +1,5 @@
 ﻿using System.Text.Json;
 using Microsoft.Extensions.Logging;
-using Synapse.Server.Extras;
 using Synapse.Server.Models;
 
 namespace Synapse.Server.Services;

@@ -46,11 +46,6 @@ internal static class IntroSkipInstallationPatch
             throw new InvalidOperationException("Could not find [IntroSkip.Installers.IntroSkipGameInstaller] type");
         }
 
-        if (method == null)
-        {
-            throw new InvalidOperationException("Could not find [InstallBindings] method");
-        }
-
-        return method;
+        return method ?? throw new InvalidOperationException("Could not find [InstallBindings] method");
     }
 }

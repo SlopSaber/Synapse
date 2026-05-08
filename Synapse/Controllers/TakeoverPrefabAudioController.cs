@@ -1,7 +1,4 @@
-﻿using JetBrains.Annotations;
-using UnityEngine;
-using UnityEngine.Audio;
-using Zenject;
+﻿using UnityEngine;
 
 namespace Synapse.Controllers;
 
