@@ -23,7 +23,7 @@ internal class AddComponentsToCamera : IAffinity
     }
 
     [AffinityPostfix]
-    [AffinityPatch(typeof(MainEffectController), nameof(MainEffectController.LazySetupImageEffectController))]
+    [AffinityPatch(typeof(MainEffectController), "get_container")]
     private void AddComponents(MainEffectController __instance)
     {
         GameObject gameObject = __instance.gameObject;

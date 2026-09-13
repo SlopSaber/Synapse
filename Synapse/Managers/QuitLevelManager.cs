@@ -8,17 +8,17 @@ internal class QuitLevelManager : IDisposable
 {
     private readonly NetworkManager _networkManager;
     private readonly PrepareLevelCompletionResults _prepareLevelCompletionResults;
-    private readonly StandardLevelScenesTransitionSetupDataSO _standardLevelScenesTransitionSetupDataSo;
+    private readonly StandardLevelScenesTransitionSetupData _standardLevelScenesTransitionSetupData;
 
     [UsedImplicitly]
     internal QuitLevelManager(
         NetworkManager networkManager,
         PrepareLevelCompletionResults prepareLevelCompletionResults,
-        StandardLevelScenesTransitionSetupDataSO standardLevelScenesTransitionSetupDataSo)
+        StandardLevelScenesTransitionSetupData standardLevelScenesTransitionSetupData)
     {
         _networkManager = networkManager;
         _prepareLevelCompletionResults = prepareLevelCompletionResults;
-        _standardLevelScenesTransitionSetupDataSo = standardLevelScenesTransitionSetupDataSo;
+        _standardLevelScenesTransitionSetupData = standardLevelScenesTransitionSetupData;
         networkManager.StopLevelReceived += OnStopLevelReceived;
         networkManager.Disconnected += OnDisconnected;
     }
@@ -45,6 +45,6 @@ internal class QuitLevelManager : IDisposable
             LevelCompletionResults.LevelEndStateType.Incomplete,
             LevelCompletionResults.LevelEndAction.None);
         UnityMainThreadTaskScheduler.Factory.StartNew(
-            () => { _standardLevelScenesTransitionSetupDataSo.Finish(levelCompletionResults); });
+            () => { _standardLevelScenesTransitionSetupData.Finish(levelCompletionResults); });
     }
 }

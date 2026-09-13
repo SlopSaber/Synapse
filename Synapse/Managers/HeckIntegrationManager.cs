@@ -73,13 +73,14 @@ internal class HeckIntegrationManager
 #if !PRE_V1_37_1 && !LATEST
         Action<DiContainer>? afterSceneSwitchCallback,
 #endif
-        Action<StandardLevelScenesTransitionSetupDataSO, LevelCompletionResults>? levelFinishedCallback,
+        Action<StandardLevelScenesTransitionSetupData, LevelCompletionResults>? levelFinishedCallback,
 #if !V1_29_1
-        Action<LevelScenesTransitionSetupDataSO, LevelCompletionResults>? levelRestartedCallback,
+        Action<LevelScenesTransitionSetupData, LevelCompletionResults>? levelRestartedCallback,
 #if LATEST
-        IBeatmapLevelData? beatmapLevelData,
-#endif
+        IBeatmapLevelData? beatmapLevelData)
+#else
         RecordingToolManager.SetupData? recordingToolData)
+#endif
 #else
         Action<LevelScenesTransitionSetupDataSO, LevelCompletionResults>? levelRestartedCallback)
 #endif
@@ -125,8 +126,9 @@ internal class HeckIntegrationManager
             levelRestartedCallback,
 #if LATEST
             beatmapLevelData,
-#endif
+#else
             recordingToolData
+#endif
 #else
             levelRestartedCallback
 #endif

@@ -264,7 +264,13 @@ internal class NetworkManager : IDisposable
 #endif
 
         PlatformAuthenticationTokenProvider provider = new(_platformUserModel, userInfo);
-        return await provider.GetAuthenticationToken();
+        XPlatformAccessTokenData accessToken =
+            await provider.GetXPlatformAccessToken(CancellationToken.None, false);
+        return new AuthenticationToken(
+            provider.GetTokenPlatform(accessToken.platformEnvironment),
+            userInfo.platformUserId,
+            userInfo.userName,
+            accessToken.token);
     }
 
     private async Task OnConnected(CancellationToken cancelToken)

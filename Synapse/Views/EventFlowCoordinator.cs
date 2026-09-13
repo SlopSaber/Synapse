@@ -374,7 +374,7 @@ internal class EventFlowCoordinator : FlowCoordinator
 
     private void HandleLevelDidFinish(
         DownloadedMap map,
-        StandardLevelScenesTransitionSetupDataSO standardLevelScenesTransitionSetupData,
+        StandardLevelScenesTransitionSetupData standardLevelScenesTransitionSetupData,
         LevelCompletionResults levelCompletionResults)
     {
         TransitionDidFinish();

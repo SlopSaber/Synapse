@@ -133,7 +133,7 @@ internal class LevelStartManager : IDisposable
     // WARNING: ruleset has lower priority than heck map settings
     public void StartLevel(
         DownloadedMap downloadedMap,
-        Action<DownloadedMap, StandardLevelScenesTransitionSetupDataSO, LevelCompletionResults>? levelFinishedCallback)
+        Action<DownloadedMap, StandardLevelScenesTransitionSetupData, LevelCompletionResults>? levelFinishedCallback)
     {
         ColorScheme? overrideColorScheme;
         if (_ruleset?.AllowOverrideColors != null && !_ruleset.AllowOverrideColors.Value)
@@ -223,7 +223,7 @@ internal class LevelStartManager : IDisposable
             }
         }
 
-        Action<StandardLevelScenesTransitionSetupDataSO, LevelCompletionResults>? callback = null;
+        Action<StandardLevelScenesTransitionSetupData, LevelCompletionResults>? callback = null;
         if (levelFinishedCallback != null)
         {
             callback = (a, b) => levelFinishedCallback(downloadedMap, a, b);
@@ -289,12 +289,7 @@ internal class LevelStartManager : IDisposable
             null,
 #endif
             callback,
-#if !V1_29_1
             null,
-#endif
-#if LATEST
-            null,
-#endif
             null);
     }
 
@@ -367,13 +362,14 @@ internal class LevelStartManager : IDisposable
 #if !PRE_V1_37_1 && !LATEST
         Action<DiContainer>? afterSceneSwitchCallback,
 #endif
-        Action<StandardLevelScenesTransitionSetupDataSO, LevelCompletionResults>? levelFinishedCallback,
+        Action<StandardLevelScenesTransitionSetupData, LevelCompletionResults>? levelFinishedCallback,
 #if !V1_29_1
-        Action<LevelScenesTransitionSetupDataSO, LevelCompletionResults>? levelRestartedCallback,
+        Action<LevelScenesTransitionSetupData, LevelCompletionResults>? levelRestartedCallback,
 #if LATEST
-        IBeatmapLevelData? beatmapLevelData,
-#endif
+        IBeatmapLevelData? beatmapLevelData)
+#else
         RecordingToolManager.SetupData? recordingToolData)
+#endif
 #else
         Action<LevelScenesTransitionSetupDataSO, LevelCompletionResults>? levelRestartedCallback)
 #endif
@@ -420,9 +416,10 @@ internal class LevelStartManager : IDisposable
 #if !V1_29_1
                 levelRestartedCallback,
 #if LATEST
-                beatmapLevelData,
-#endif
+                beatmapLevelData);
+#else
                 recordingToolData);
+#endif
 #else
                 levelRestartedCallback);
 #endif
@@ -469,9 +466,10 @@ internal class LevelStartManager : IDisposable
 #if !V1_29_1
                 levelRestartedCallback,
 #if LATEST
-                beatmapLevelData,
-#endif
+                beatmapLevelData);
+#else
                 recordingToolData);
+#endif
 #else
                 levelRestartedCallback);
 #endif

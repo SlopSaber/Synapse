@@ -300,9 +300,17 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
             List<BeatmapKey> beatmapKeys = map.Keys.Select(
                 n =>
                 {
-                    BeatmapCharacteristicSO characteristic =
-                        _customLevelLoader._beatmapCharacteristicCollection.GetBeatmapCharacteristicBySerializedName(
-                            n.Characteristic);
+                    if (!Enum.TryParse(n.Characteristic, true, out BeatmapCharacteristic characteristic))
+                    {
+                        characteristic = n.Characteristic.ToLowerInvariant() switch
+                        {
+                            "360degree" => BeatmapCharacteristic.Degree360,
+                            "90degree" => BeatmapCharacteristic.Degree90,
+                            _ => throw new InvalidOperationException(
+                                $"Failed to find characteristic: [{n.Characteristic}].")
+                        };
+                    }
+
                     return new BeatmapKey(beatmapLevel.levelID, characteristic, (BeatmapDifficulty)n.Difficulty);
                 }).ToList();
 #else

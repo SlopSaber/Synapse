@@ -87,7 +87,7 @@ internal class PauseHijack : IAffinity, IInitializable
     }
 
     [AffinityPostfix]
-    [AffinityPatch(typeof(PauseController), nameof(PauseController.HandlePauseMenuManagerDidPressContinueButton))]
+    [AffinityPatch(typeof(PauseController), nameof(PauseController.HandlePauseMenuManagerDidStartResumeAnimation))]
     private void InstantResume(GamePause ____gamePause)
     {
         ____gamePause.Resume();
