@@ -144,8 +144,8 @@ internal class EventLobbySongInfoViewController : BSMLAutomaticViewController
 
             _songText.enableAutoSizing = true;
             _authorText.enableAutoSizing = true;
-            _songText.enableWordWrapping = false;
-            _authorText.enableWordWrapping = false;
+            Synapse.Extras.UICompatibility.SetWrapping(_songText, false);
+            Synapse.Extras.UICompatibility.SetWrapping(_authorText, false);
             _songText.fontSizeMin = _songText.fontSize / 4;
             _songText.fontSizeMax = _songText.fontSize;
             _authorText.fontSizeMin = _authorText.fontSize / 4;

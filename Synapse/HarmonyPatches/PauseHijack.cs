@@ -27,7 +27,7 @@ internal class PauseHijack : IAffinity, IInitializable
     {
         const string warning =
             "<color=\"red\">WARNING\nQuitting will submit your current score.\nAre you sure you want to quit?</color>";
-        TextMeshProUGUI textMesh = BeatSaberUI.CreateText(
+        TextMeshProUGUI textMesh = Synapse.Extras.UICompatibility.CreateText(
             (RectTransform)_pauseMenuManager.transform.Find("Wrapper/MenuWrapper/Canvas"),
             warning,
             Vector2.zero);

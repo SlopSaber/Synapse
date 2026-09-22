@@ -496,11 +496,11 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
                     else if (_disabledPriorityMessages.Count == 0)
                     {
                         TextMeshProUGUI prio =
-                            BeatSaberUI.CreateText(
+                            Synapse.Extras.UICompatibility.CreateText(
                                 (RectTransform)_priorityBg.transform,
                                 content,
                                 Vector2.zero);
-                        prio.enableWordWrapping = true;
+                        Synapse.Extras.UICompatibility.SetWrapping(prio, true);
                         prio.richText = true;
                         prio.color = color;
                         prio.alignment = TextAlignmentOptions.Left;
@@ -538,11 +538,11 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
                 else
                 {
                     TextMeshProUGUI text =
-                        BeatSaberUI.CreateText(
+                        Synapse.Extras.UICompatibility.CreateText(
                             (RectTransform)_textObject.transform,
                             content,
                             Vector2.zero);
-                    text.enableWordWrapping = true;
+                    Synapse.Extras.UICompatibility.SetWrapping(text, true);
                     text.richText = true;
                     text.color = color;
                     text.alignment = TextAlignmentOptions.Left;

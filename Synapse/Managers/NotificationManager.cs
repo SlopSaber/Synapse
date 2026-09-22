@@ -155,7 +155,7 @@ internal class NotificationManager : MonoBehaviour
             canvas.renderMode = RenderMode.WorldSpace;
             RectTransform rectTransform = (RectTransform)canvas.transform;
             rectTransform.localScale = new Vector3(0.01f, 0.01f, 0.01f);
-            TextMeshProUGUI textMesh = BeatSaberUI.CreateText(rectTransform, string.Empty, Vector2.zero);
+            TextMeshProUGUI textMesh = Synapse.Extras.UICompatibility.CreateText(rectTransform, string.Empty, Vector2.zero);
             textMesh.gameObject.layer = 5;
             textMesh.alignment = TextAlignmentOptions.Center;
             textMesh.fontSize = 15;

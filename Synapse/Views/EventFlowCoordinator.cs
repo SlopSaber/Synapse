@@ -391,7 +391,8 @@ internal class EventFlowCoordinator : FlowCoordinator
         IDifficultyBeatmap difficultyBeatmap = standardLevelScenesTransitionSetupData.difficultyBeatmap;
 #else
         BeatmapKey beatmapKey = standardLevelScenesTransitionSetupData.beatmapKey;
-        BeatmapLevel beatmapLevel = standardLevelScenesTransitionSetupData.beatmapLevel;
+        BeatmapLevel beatmapLevel = standardLevelScenesTransitionSetupData.beatmapLevel
+            ?? throw new InvalidOperationException("Completed event has no beatmap level.");
 #endif
         IReadonlyBeatmapData transformedBeatmapData = standardLevelScenesTransitionSetupData.transformedBeatmapData;
         ////this._menuLightsManager.SetColorPreset((levelCompletionResults.levelEndStateType == LevelCompletionResults.LevelEndStateType.Cleared) ? this._resultsClearedLightsPreset : this._resultsFailedLightsPreset, true);

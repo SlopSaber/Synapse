@@ -188,7 +188,7 @@ internal static class MediaExtensions
         // ReSharper disable once InvertIf
         if (!_spriteCache.TryGetValue(url, out Sprite result))
         {
-            UnityWebRequest www = UnityWebRequestTexture.GetTexture(url);
+            using UnityWebRequest www = UnityWebRequestTexture.GetTexture(url);
             await www.SendAndVerify(token);
             Texture2D tex = DownloadHandlerTexture.GetContent(www);
             _spriteCache[url] = result = tex.GetSprite();
@@ -209,8 +209,9 @@ internal static class MediaExtensions
         Action<float>? progress,
         CancellationToken token)
     {
-        www.SendWebRequest();
-        while (!www.isDone)
+        token.ThrowIfCancellationRequested();
+        UnityWebRequestAsyncOperation operation = www.SendWebRequest();
+        while (!operation.isDone)
         {
             if (token.IsCancellationRequested)
             {
@@ -223,6 +224,12 @@ internal static class MediaExtensions
             await Task.Delay(100, CancellationToken.None);
         }
 
+#if MODERN_GAME_UI
+        if (www.result != UnityWebRequest.Result.Success)
+        {
+            throw new InvalidOperationException($"Request to [{www.url}] failed ({www.result}, {www.responseCode}): {www.error}");
+        }
+#else
 #pragma warning disable CS0618 // Type or member is obsolete
         if (www.isHttpError)
         {
@@ -235,5 +242,6 @@ internal static class MediaExtensions
             throw new InvalidOperationException($"Failed to connect to [{www.url}], network error ({www.error}).");
         }
 #pragma warning restore CS0618 // Type or member is obsolete
+#endif
     }
 }
