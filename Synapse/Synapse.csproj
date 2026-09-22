@@ -2,6 +2,8 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net48</TargetFramework>
+    <EnableFrameworkPathOverride>true</EnableFrameworkPathOverride>
+    <FrameworkPathOverride>$(BeatSaberDir)\Beat Saber_Data\Managed</FrameworkPathOverride>
     <OutputType>Library</OutputType>
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
@@ -18,6 +20,7 @@
     <Description>Connect with other players for live events with chatting, leaderboards, and synchronized play.</Description>
   </PropertyGroup>
   <ItemGroup>
+    <Reference Include="netstandard" HintPath="$(BeatSaberDir)\Beat Saber_Data\Managed\netstandard.dll" Private="false" />
     <DependsOn Include="BeatSaberMarkupLanguage" Version="^1.6.3"/>
     <DependsOn Include="BSIPA" Version="^4.2.2"/>
     <DependsOn Include="SiraUtil" Version="^3.0.5"/>
