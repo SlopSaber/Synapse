@@ -22,6 +22,8 @@ internal class ListingManager : IInitializable
     private string? _lastListing;
 
     private Task? _initializeTask;
+    private DateTime _nextAttemptUtc;
+    private string? _lastAttemptUrl;
 
     [UsedImplicitly]
     private ListingManager(SiraLog log, Config config, CancellationTokenManager cancellationTokenManager)
@@ -75,10 +77,23 @@ internal class ListingManager : IInitializable
             return;
         }
 
-        _initializeTask = InitializeAsync(_cancellationTokenManager.Reset());
+        string url = Plugin.ListingOverride ?? _config.Url;
+        if (url == _lastAttemptUrl && DateTime.UtcNow < _nextAttemptUtc)
+        {
+            return;
+        }
+
+        _lastAttemptUrl = url;
+        _initializeTask = InitializeAsync(url, _cancellationTokenManager.Reset());
     }
 
     public void Clear()
+    {
+        _nextAttemptUtc = DateTime.MinValue;
+        ClearListing();
+    }
+
+    private void ClearListing()
     {
         Listing = null;
         _bannerUrl = null;
@@ -112,21 +127,30 @@ internal class ListingManager : IInitializable
         }
     }
 
-    private async Task InitializeAsync(CancellationToken token)
+    private async Task InitializeAsync(string url, CancellationToken token)
     {
         try
         {
-            string url = Plugin.ListingOverride ?? _config.Url;
             _log.Debug($"Checking [{url}] for active listing");
-            UnityWebRequest www = UnityWebRequest.Get(url);
-            await www.SendAndVerify(token);
+            using UnityWebRequest www = UnityWebRequest.Get(url);
+            www.timeout = 20;
+            try
+            {
+                await www.SendAndVerify(token);
+            }
+            catch (InvalidOperationException) when (www.responseCode == 404 || www.responseCode == 410)
+            {
+                _nextAttemptUtc = DateTime.UtcNow.AddMinutes(5);
+                ClearListing();
+                _log.Warn($"Listing endpoint [{url}] is unavailable (HTTP {www.responseCode}); checking again after five minutes.");
+                return;
+            }
 
             string json = www.downloadHandler.text;
             Listing? listing = JsonConvert.DeserializeObject<Listing>(json, JsonSettings.Settings);
             if (listing == null)
             {
-                _log.Error("Error deserializing listing");
-                return;
+                throw new JsonSerializationException("Listing response contained no event data.");
             }
 
             if (listing.Guid == _lastListing)
@@ -150,17 +174,15 @@ internal class ListingManager : IInitializable
 
             _ = GetBannerImage(listing, token);
         }
-        catch (OperationCanceledException)
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
         {
-            throw;
+            // Initialize owns this task; cancellation must not leave an unobserved fault.
         }
         catch (Exception e)
         {
             _log.Warn($"Exception while loading listing\n{e}");
-            _lastListing = null;
-            ListingFoundBacking?.Invoke(null);
-            BannerImageCreatedBacking?.Invoke(null);
-            throw;
+            _nextAttemptUtc = DateTime.UtcNow.AddSeconds(30);
+            ClearListing();
         }
     }
 }
