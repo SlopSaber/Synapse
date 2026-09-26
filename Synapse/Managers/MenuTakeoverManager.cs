@@ -174,10 +174,14 @@ internal class MenuTakeoverManager : IDisposable, ITickable
             }
 
             _log.Debug($"Downloading menu takeover bundle from [{url}]");
-            UnityWebRequest www = UnityWebRequest.Get(url);
+            using UnityWebRequest www = UnityWebRequest.Get(url);
             await www.SendAndVerify(null, _cancellationTokenManager.Reset());
-            Directory.CreateDirectory(_takeoverFolder);
-            File.WriteAllBytes(filePath, www.downloadHandler.data);
+            byte[] data = www.downloadHandler.data;
+            await Task.Run(() =>
+            {
+                Directory.CreateDirectory(_takeoverFolder);
+                File.WriteAllBytes(filePath, data);
+            });
             await LoadBundle(filePath, listing);
         }
         catch (OperationCanceledException)

@@ -138,10 +138,14 @@ internal class MenuPrefabManager : IDisposable
             }
 
             _log.Debug($"Downloading lobby bundle from [{url}]");
-            UnityWebRequest www = UnityWebRequest.Get(url);
+            using UnityWebRequest www = UnityWebRequest.Get(url);
             await www.SendAndVerify(n => DownloadProgress = n * 0.98f, _cancellationTokenManager.Reset());
-            Directory.CreateDirectory(_folder);
-            File.WriteAllBytes(_filePath, www.downloadHandler.data);
+            byte[] data = www.downloadHandler.data;
+            await Task.Run(() =>
+            {
+                Directory.CreateDirectory(_folder);
+                File.WriteAllBytes(_filePath, data);
+            });
             DownloadProgress = 0.99f;
             await LoadBundle();
             DownloadProgress = 1;

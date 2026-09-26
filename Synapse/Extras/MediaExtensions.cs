@@ -121,18 +121,20 @@ internal static class MediaExtensions
     internal static async Task<T> LoadAssetAsyncTask<T>(this AssetBundle assetBundle, string name)
         where T : Object
     {
-        TaskCompletionSource<T> taskCompletionSource = new();
+        TaskCompletionSource<T> taskCompletionSource = new(TaskCreationOptions.RunContinuationsAsynchronously);
         AssetBundleRequest bundleRequest = assetBundle.LoadAssetAsync<T>(name);
         bundleRequest.completed += _ =>
         {
             if (bundleRequest.asset == null)
             {
-                throw new InvalidOperationException("Asset was null.");
+                taskCompletionSource.TrySetException(new InvalidOperationException("Asset was null."));
+                return;
             }
 
             if (bundleRequest.asset is not T asset)
             {
-                throw new InvalidOperationException($"Asset was not {typeof(T).Name}.");
+                taskCompletionSource.TrySetException(new InvalidOperationException($"Asset was not {typeof(T).Name}."));
+                return;
             }
 
             taskCompletionSource.SetResult(asset);
@@ -223,6 +225,8 @@ internal static class MediaExtensions
             progress?.Invoke(www.downloadProgress);
             await Task.Delay(100, CancellationToken.None);
         }
+
+        token.ThrowIfCancellationRequested();
 
 #if MODERN_GAME_UI
         if (www.result != UnityWebRequest.Result.Success)
