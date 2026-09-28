@@ -142,7 +142,7 @@ internal class ListingManager : IInitializable
             {
                 _nextAttemptUtc = DateTime.UtcNow.AddMinutes(5);
                 ClearListing();
-                _log.Warn($"Listing endpoint [{url}] is unavailable (HTTP {www.responseCode}); checking again after five minutes.");
+                _log.Info($"Listing endpoint [{url}] is unavailable (HTTP {www.responseCode}); checking again after five minutes.");
                 return;
             }
 
