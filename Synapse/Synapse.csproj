@@ -1,10 +1,11 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <ImportBSMTTargets>true</ImportBSMTTargets>
     <BSMTProjectType>BSIPA</BSMTProjectType>
-    <GameDirectory Condition="!$(Configuration.EndsWith('1.45.1')) AND '$(GameDirectory)' == ''">$(BeatSaberDir)</GameDirectory>
+    <GameDirectory Condition="!$(Configuration.EndsWith('1.45.1')) AND !$(Configuration.EndsWith('1.45.2')) AND '$(GameDirectory)' == ''">$(BeatSaberDir)</GameDirectory>
     <GameDirectory Condition="$(Configuration.EndsWith('1.45.1'))">D:\BSManager\BSInstances\1.45.1</GameDirectory>
+    <GameDirectory Condition="$(Configuration.EndsWith('1.45.2'))">D:\BSManager\BSInstances\1.45.2</GameDirectory>
     <CopyPDB>false</CopyPDB>
     <DisableCopyToGame Condition="$(Configuration.EndsWith('1.45.1'))">false</DisableCopyToGame>
     <TargetFramework>net48</TargetFramework>
@@ -14,7 +15,7 @@
     <LangVersion>latest</LangVersion>
     <Nullable>enable</Nullable>
     <DefineConstants>$(DefineConstants);LATEST</DefineConstants>
-    <Configurations>Debug-1.29.1;Release-1.29.1;Debug-1.34.2;Release-1.34.2;Debug-1.37.1;Release-1.37.1;Debug-1.40.8;Release-1.40.8;Debug-1.42.1;Release-1.42.1;Debug-1.45.0;Release-1.45.0;Debug-1.45.1;Release-1.45.1</Configurations>
+    <Configurations>Debug-1.29.1;Release-1.29.1;Debug-1.34.2;Release-1.34.2;Debug-1.37.1;Release-1.37.1;Debug-1.40.8;Release-1.40.8;Debug-1.42.1;Release-1.42.1;Debug-1.45.0;Release-1.45.0;Debug-1.45.1;Release-1.45.1;Debug-1.45.2;Release-1.45.2</Configurations>
   </PropertyGroup>
 
   <PropertyGroup>
@@ -22,10 +23,10 @@
     <PluginName>Synapse</PluginName>
     <Author>Aeroluna</Author>
     <Version>1.2.0</Version>
-    <GameVersion>1.45.1</GameVersion>
+    <GameVersion>1.45.2</GameVersion>
     <Description>Connect with other players for live events with chatting, leaderboards, and synchronized play.</Description>
   </PropertyGroup>
-  <PropertyGroup Condition="$(Configuration.EndsWith('1.45.0')) OR $(Configuration.EndsWith('1.45.1'))">
+  <PropertyGroup Condition="$(Configuration.EndsWith('1.45.0')) OR $(Configuration.EndsWith('1.45.1')) OR $(Configuration.EndsWith('1.45.2'))">
     <DefineConstants>$(DefineConstants);MODERN_GAME_UI</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
