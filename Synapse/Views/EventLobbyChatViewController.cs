@@ -68,6 +68,8 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
 
     private readonly Stack<PriorityMessage> _disabledPriorityMessages = [];
     private readonly List<PriorityMessage> _priorityMessages = [];
+    private readonly HashSet<string> _preparationBans = [];
+    private readonly ConcurrentQueue<MessageIngress> _messageIngress = new();
 
     private SiraLog _log = null!;
     private Config _config = null!;
@@ -81,8 +83,6 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
     private OkRelay _okRelay = null!;
 
     private string _playerCountText = string.Empty;
-    private readonly HashSet<string> _preparationBans = [];
-    private readonly ConcurrentQueue<MessageIngress> _messageIngress = new();
     private Task<PreparedBatch>? _preparationTask;
     private MessageRequest? _preparationRequest;
     private int _messageRevision;
@@ -690,29 +690,11 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
         internal int Revision { get; } = revision;
     }
 
-    private sealed class MessageRequest(ChatMessage[] messages, bool filter, CultureInfo culture, int revision)
-    {
-        internal readonly ChatMessage[] Messages = messages;
-        internal readonly bool Filter = filter;
-        internal readonly CultureInfo Culture = culture;
-        internal readonly int Revision = revision;
-        internal volatile bool Retired;
-    }
-
     private readonly struct PreparedMessage(ChatMessage message, string content)
     {
         internal ChatMessage Message { get; } = message;
 
         internal string Content { get; } = content;
-    }
-
-    private sealed class PreparedBatch(PreparedMessage[] messages, Exception? error, int failureIndex = -1)
-    {
-        internal PreparedMessage[] Messages { get; } = messages;
-
-        internal Exception? Error { get; } = error;
-
-        internal int FailureIndex { get; } = failureIndex;
     }
 
     private static class MessagePreparation
@@ -806,6 +788,34 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
 
             return color[0] != '#' ? $"<color=\"{color}\">{message}</color>" : $"<color={color}>{message}</color>";
         }
+    }
+
+    private sealed class MessageRequest(ChatMessage[] messages, bool filter, CultureInfo culture, int revision)
+    {
+        private volatile bool _retired;
+
+        internal ChatMessage[] Messages { get; } = messages;
+
+        internal bool Filter { get; } = filter;
+
+        internal CultureInfo Culture { get; } = culture;
+
+        internal int Revision { get; } = revision;
+
+        internal bool Retired
+        {
+            get => _retired;
+            set => _retired = value;
+        }
+    }
+
+    private sealed class PreparedBatch(PreparedMessage[] messages, Exception? error, int failureIndex = -1)
+    {
+        internal PreparedMessage[] Messages { get; } = messages;
+
+        internal Exception? Error { get; } = error;
+
+        internal int FailureIndex { get; } = failureIndex;
     }
 
     private class PriorityMessage
