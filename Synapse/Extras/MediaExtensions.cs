@@ -25,20 +25,23 @@ internal static class MediaExtensions
         using UnityWebRequest www = UnityWebRequest.Get(url);
         await www.SendAndVerify(progress, token);
 
-        MemoryStream stream = new(www.downloadHandler.data);
-
-        using MD5 md5 = MD5.Create();
-        string computed = BitConverter
-            .ToString(md5.ComputeHash(stream))
-            .Replace("-", string.Empty)
-            .ToLowerInvariant();
-        if (computed != hash && !Plugin.SkipHash)
+        DownloadHashRequest request = new(www.downloadHandler.data, hash, Plugin.SkipHash);
+        MemoryStream stream = await Task.Factory.StartNew(
+            PrepareDownloadHash,
+            request,
+            token,
+            TaskCreationOptions.DenyChildAttach,
+            TaskScheduler.Default);
+        try
         {
-            throw new InvalidOperationException($"MD5 mismatch, expected: [{hash}], calculated: [{computed}].");
+            token.ThrowIfCancellationRequested();
+            return stream;
         }
-
-        stream.Position = 0;
-        return stream;
+        catch
+        {
+            stream.Dispose();
+            throw;
+        }
     }
 
     internal static Task Unzip(
@@ -247,5 +250,40 @@ internal static class MediaExtensions
         }
 #pragma warning restore CS0618 // Type or member is obsolete
 #endif
+    }
+
+    private static MemoryStream PrepareDownloadHash(object state)
+    {
+        DownloadHashRequest request = (DownloadHashRequest)state;
+        MemoryStream stream = new(request.Bytes);
+        try
+        {
+            using MD5 md5 = MD5.Create();
+            string computed = BitConverter
+                .ToString(md5.ComputeHash(stream))
+                .Replace("-", string.Empty)
+                .ToLowerInvariant();
+            if (computed != request.Hash && !request.SkipHash)
+            {
+                throw new InvalidOperationException($"MD5 mismatch, expected: [{request.Hash}], calculated: [{computed}].");
+            }
+
+            stream.Position = 0;
+            return stream;
+        }
+        catch
+        {
+            stream.Dispose();
+            throw;
+        }
+    }
+
+    private sealed class DownloadHashRequest(byte[] bytes, string hash, bool skipHash)
+    {
+        public byte[] Bytes { get; } = bytes;
+
+        public string Hash { get; } = hash;
+
+        public bool SkipHash { get; } = skipHash;
     }
 }
