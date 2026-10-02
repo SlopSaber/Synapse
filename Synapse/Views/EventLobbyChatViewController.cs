@@ -86,6 +86,9 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
     private int _messageRevision;
     private int _ownerThreadId;
     private bool _viewActive;
+    private Action<ChatMessage>? _messageReceivedHandler;
+    private Action<string>? _userBannedHandler;
+    private Action<IStageStatus>? _stageUpdatedHandler;
 
     internal event Action? IntroStarted;
 
@@ -151,9 +154,9 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
 #endif
     {
         RetirePreparation();
-        _messageManager.MessageReceived -= OnMessageReceived;
-        _networkManager.UserBanned -= OnUserBanned;
-        _networkManager.StageUpdated -= OnStageUpdated;
+        _messageManager.MessageReceived -= _messageReceivedHandler;
+        _networkManager.UserBanned -= _userBannedHandler;
+        _networkManager.StageUpdated -= _stageUpdatedHandler;
         _networkManager.PlayerCountUpdated -= OnPlayerCountUpdated;
         if (_okRelay != null)
         {
@@ -223,12 +226,16 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
         // ReSharper disable once InvertIf
         if (addedToHierarchy)
         {
+            int revision = Interlocked.Increment(ref _messageRevision);
             _viewActive = true;
-            _messageManager.MessageReceived += OnMessageReceived;
+            _messageReceivedHandler = message => OnMessageReceived(message, revision);
+            _userBannedHandler = id => OnUserBanned(id, revision);
+            _stageUpdatedHandler = stage => OnStageUpdated(stage, revision);
+            _messageManager.MessageReceived += _messageReceivedHandler;
             _messageManager.RefreshMotd();
-            _networkManager.UserBanned += OnUserBanned;
-            OnStageUpdated(_networkManager.Status.Stage);
-            _networkManager.StageUpdated += OnStageUpdated;
+            _networkManager.UserBanned += _userBannedHandler;
+            OnStageUpdated(_networkManager.Status.Stage, revision);
+            _networkManager.StageUpdated += _stageUpdatedHandler;
 
             Listing? listing = _listingManager.Listing;
             GameObject parent = _divisionSetting.transform.parent.gameObject;
@@ -276,9 +283,9 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
                 Destroy(obj.gameObject);
             }
 
-            _messageManager.MessageReceived -= OnMessageReceived;
-            _networkManager.UserBanned -= OnUserBanned;
-            _networkManager.StageUpdated -= OnStageUpdated;
+            _messageManager.MessageReceived -= _messageReceivedHandler;
+            _networkManager.UserBanned -= _userBannedHandler;
+            _networkManager.StageUpdated -= _stageUpdatedHandler;
         }
 
         _keyboardOpener.Close();
@@ -306,11 +313,15 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
         networkManager.PlayerCountUpdated += OnPlayerCountUpdated;
     }
 
-    private void OnMessageReceived(ChatMessage message)
+    private void OnMessageReceived(ChatMessage message, int revision)
     {
+        if (revision != Volatile.Read(ref _messageRevision))
+        {
+            return;
+        }
+
         if (Thread.CurrentThread.ManagedThreadId != _ownerThreadId)
         {
-            int revision = Volatile.Read(ref _messageRevision);
             UnityMainThreadTaskScheduler.Factory.StartNew(
                 () =>
                 {
@@ -362,9 +373,8 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
         _playerCountText = $"\ud83d\udcac {chatters} / \ud83d\udc64 {online}";
     }
 
-    private void OnStageUpdated(IStageStatus stageStatus)
+    private void OnStageUpdated(IStageStatus stageStatus, int revision)
     {
-        int revision = Volatile.Read(ref _messageRevision);
         UnityMainThreadTaskScheduler.Factory.StartNew(
             () =>
             {
@@ -386,17 +396,21 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
         _scrollView.ScrollToEnd(true);
     }
 
-    private void OnUserBanned(string id)
+    private void OnUserBanned(string id, int revision)
     {
+        if (revision != Volatile.Read(ref _messageRevision))
+        {
+            return;
+        }
+
         if (Thread.CurrentThread.ManagedThreadId != _ownerThreadId)
         {
-            int revision = Volatile.Read(ref _messageRevision);
             UnityMainThreadTaskScheduler.Factory.StartNew(
                 () =>
                 {
                     if (this && _viewActive && revision == _messageRevision)
                     {
-                        OnUserBanned(id);
+                        OnUserBanned(id, revision);
                     }
                 });
             return;
@@ -517,7 +531,13 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
                 return;
             }
 
-            if (request.Filter != _config.ProfanityFilter)
+            CultureInfo culture = CultureInfo.CurrentCulture;
+            bool sameCulture = request.Culture.GetType() == typeof(CultureInfo)
+                ? culture.GetType() == typeof(CultureInfo) && request.Culture.Name == culture.Name
+                : ReferenceEquals(request.Culture, culture);
+            bool bannedFailure = batch.Error != null && batch.FailureIndex >= 0 &&
+                                 _preparationBans.Contains(request.Messages[batch.FailureIndex].Id);
+            if (request.Filter != _config.ProfanityFilter || !sameCulture || bannedFailure)
             {
                 _messageQueue.InsertRange(0, request.Messages.Where(n => !_preparationBans.Contains(n.Id)));
                 return;
@@ -688,11 +708,13 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
         internal string Content { get; } = content;
     }
 
-    private sealed class PreparedBatch(PreparedMessage[] messages, Exception? error)
+    private sealed class PreparedBatch(PreparedMessage[] messages, Exception? error, int failureIndex = -1)
     {
         internal PreparedMessage[] Messages { get; } = messages;
 
         internal Exception? Error { get; } = error;
+
+        internal int FailureIndex { get; } = failureIndex;
     }
 
     private static class MessagePreparation
@@ -704,11 +726,13 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
             MessageRequest request = (MessageRequest)state!;
             List<PreparedMessage> messages = new(request.Messages.Length);
             CultureInfo previousCulture = CultureInfo.CurrentCulture;
+            int failureIndex = -1;
             try
             {
                 CultureInfo.CurrentCulture = request.Culture;
                 foreach (ChatMessage message in request.Messages)
                 {
+                    ++failureIndex;
                     if (request.Retired)
                     {
                         break;
@@ -749,7 +773,7 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
             }
             catch (Exception error)
             {
-                return new PreparedBatch(messages.ToArray(), error);
+                return new PreparedBatch(messages.ToArray(), error, failureIndex);
             }
             finally
             {
