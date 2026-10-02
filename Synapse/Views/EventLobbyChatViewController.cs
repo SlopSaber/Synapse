@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -81,10 +82,10 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
 
     private string _playerCountText = string.Empty;
     private readonly HashSet<string> _preparationBans = [];
+    private readonly ConcurrentQueue<MessageIngress> _messageIngress = new();
     private Task<PreparedBatch>? _preparationTask;
     private MessageRequest? _preparationRequest;
     private int _messageRevision;
-    private int _ownerThreadId;
     private bool _viewActive;
     private Action<ChatMessage>? _messageReceivedHandler;
     private Action<string>? _userBannedHandler;
@@ -302,7 +303,6 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
         IInstantiator instantiator,
         EventLeaderboardViewController leaderboardViewController)
     {
-        _ownerThreadId = Thread.CurrentThread.ManagedThreadId;
         _log = log;
         _config = config;
         _messageManager = messageManager;
@@ -315,27 +315,9 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
 
     private void OnMessageReceived(ChatMessage message, int revision)
     {
-        if (revision != Volatile.Read(ref _messageRevision))
+        if (revision == Volatile.Read(ref _messageRevision))
         {
-            return;
-        }
-
-        if (Thread.CurrentThread.ManagedThreadId != _ownerThreadId)
-        {
-            UnityMainThreadTaskScheduler.Factory.StartNew(
-                () =>
-                {
-                    if (this && _viewActive && revision == _messageRevision)
-                    {
-                        _messageQueue.Add(message);
-                    }
-                });
-            return;
-        }
-
-        if (_viewActive)
-        {
-            _messageQueue.Add(message);
+            _messageIngress.Enqueue(new MessageIngress(message, null, false, revision));
         }
     }
 
@@ -398,29 +380,14 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
 
     private void OnUserBanned(string id, int revision)
     {
-        if (revision != Volatile.Read(ref _messageRevision))
+        if (revision == Volatile.Read(ref _messageRevision))
         {
-            return;
+            _messageIngress.Enqueue(new MessageIngress(default, id, true, revision));
         }
+    }
 
-        if (Thread.CurrentThread.ManagedThreadId != _ownerThreadId)
-        {
-            UnityMainThreadTaskScheduler.Factory.StartNew(
-                () =>
-                {
-                    if (this && _viewActive && revision == _messageRevision)
-                    {
-                        OnUserBanned(id, revision);
-                    }
-                });
-            return;
-        }
-
-        if (!_viewActive)
-        {
-            return;
-        }
-
+    private void ApplyUserBan(string id)
+    {
         if (_preparationTask != null)
         {
             _preparationBans.Add(id);
@@ -482,6 +449,23 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
 
     private void Update()
     {
+        while (_messageIngress.TryDequeue(out MessageIngress ingress))
+        {
+            if (!_viewActive || ingress.Revision != _messageRevision)
+            {
+                continue;
+            }
+
+            if (ingress.IsBan)
+            {
+                ApplyUserBan(ingress.BannedId!);
+            }
+            else
+            {
+                _messageQueue.Add(ingress.Message);
+            }
+        }
+
         if (_playerCountText != _playerCount.text)
         {
             _playerCount.text = _playerCountText;
@@ -690,6 +674,20 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
         // Keep the physical task until completion before starting another batch.
         _messageQueue.Clear();
         _preparationBans.Clear();
+        while (_messageIngress.TryDequeue(out _))
+        {
+        }
+    }
+
+    private readonly struct MessageIngress(ChatMessage message, string? bannedId, bool isBan, int revision)
+    {
+        internal ChatMessage Message { get; } = message;
+
+        internal string? BannedId { get; } = bannedId;
+
+        internal bool IsBan { get; } = isBan;
+
+        internal int Revision { get; } = revision;
     }
 
     private sealed class MessageRequest(ChatMessage[] messages, bool filter, CultureInfo culture, int revision)
