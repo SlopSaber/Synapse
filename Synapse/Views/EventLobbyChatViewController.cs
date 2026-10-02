@@ -1,7 +1,10 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Text;
+using System.Threading;
+using System.Threading.Tasks;
 using BeatSaberMarkupLanguage;
 using BeatSaberMarkupLanguage.Attributes;
 using BeatSaberMarkupLanguage.Components;
@@ -26,8 +29,6 @@ namespace Synapse.Views;
 [ViewDefinition("Synapse.Resources.LobbyChat.bsml")]
 internal class EventLobbyChatViewController : BSMLAutomaticViewController
 {
-    private static readonly ProfanityFilter.ProfanityFilter _profanityFilter = new();
-
     [UIComponent("chat")]
     private readonly VerticalLayoutGroup _chatObject = null!;
 
@@ -79,6 +80,12 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
     private OkRelay _okRelay = null!;
 
     private string _playerCountText = string.Empty;
+    private readonly HashSet<string> _preparationBans = [];
+    private Task<PreparedBatch>? _preparationTask;
+    private MessageRequest? _preparationRequest;
+    private int _messageRevision;
+    private int _ownerThreadId;
+    private bool _viewActive;
 
     internal event Action? IntroStarted;
 
@@ -143,8 +150,17 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
     public override void OnDestroy()
 #endif
     {
-        base.OnDestroy();
+        RetirePreparation();
+        _messageManager.MessageReceived -= OnMessageReceived;
+        _networkManager.UserBanned -= OnUserBanned;
+        _networkManager.StageUpdated -= OnStageUpdated;
         _networkManager.PlayerCountUpdated -= OnPlayerCountUpdated;
+        if (_okRelay != null)
+        {
+            _okRelay.OkPressed -= OnOkPressed;
+        }
+
+        base.OnDestroy();
     }
 
     protected override void DidActivate(bool firstActivation, bool addedToHierarchy, bool screenSystemEnabling)
@@ -207,6 +223,7 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
         // ReSharper disable once InvertIf
         if (addedToHierarchy)
         {
+            _viewActive = true;
             _messageManager.MessageReceived += OnMessageReceived;
             _messageManager.RefreshMotd();
             _networkManager.UserBanned += OnUserBanned;
@@ -243,6 +260,7 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
         // ReSharper disable once InvertIf
         if (removedFromHierarchy)
         {
+            RetirePreparation();
             _priorityVertical.gameObject.SetActive(false);
             _priorityMessages.Clear();
             _disabledPriorityMessages.Clear();
@@ -277,6 +295,7 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
         IInstantiator instantiator,
         EventLeaderboardViewController leaderboardViewController)
     {
+        _ownerThreadId = Thread.CurrentThread.ManagedThreadId;
         _log = log;
         _config = config;
         _messageManager = messageManager;
@@ -289,7 +308,24 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
 
     private void OnMessageReceived(ChatMessage message)
     {
-        _messageQueue.Add(message);
+        if (Thread.CurrentThread.ManagedThreadId != _ownerThreadId)
+        {
+            int revision = Volatile.Read(ref _messageRevision);
+            UnityMainThreadTaskScheduler.Factory.StartNew(
+                () =>
+                {
+                    if (this && _viewActive && revision == _messageRevision)
+                    {
+                        _messageQueue.Add(message);
+                    }
+                });
+            return;
+        }
+
+        if (_viewActive)
+        {
+            _messageQueue.Add(message);
+        }
     }
 
     private void OnOkPressed()
@@ -328,9 +364,16 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
 
     private void OnStageUpdated(IStageStatus stageStatus)
     {
+        int revision = Volatile.Read(ref _messageRevision);
         UnityMainThreadTaskScheduler.Factory.StartNew(
             () =>
             {
+                if (!this || !_viewActive || revision != _messageRevision ||
+                    !ReferenceEquals(stageStatus, _networkManager.Status.Stage))
+                {
+                    return;
+                }
+
                 _replayIntroObject.SetActive(stageStatus is not IntroStatus);
                 _replayOutroObject.SetActive(stageStatus is FinishStatus);
             });
@@ -345,6 +388,30 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
 
     private void OnUserBanned(string id)
     {
+        if (Thread.CurrentThread.ManagedThreadId != _ownerThreadId)
+        {
+            int revision = Volatile.Read(ref _messageRevision);
+            UnityMainThreadTaskScheduler.Factory.StartNew(
+                () =>
+                {
+                    if (this && _viewActive && revision == _messageRevision)
+                    {
+                        OnUserBanned(id);
+                    }
+                });
+            return;
+        }
+
+        if (!_viewActive)
+        {
+            return;
+        }
+
+        if (_preparationTask != null)
+        {
+            _preparationBans.Add(id);
+        }
+
         _messageQueue.RemoveAll(n => n.Id == id);
 
         bool scrollToEnd = AtEnd();
@@ -429,56 +496,52 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
             }
         }
 
-        if (_messageQueue.Count == 0)
+        if (_preparationTask == null)
+        {
+            StartPreparation();
+            return;
+        }
+
+        if (!_preparationTask.IsCompleted)
         {
             return;
         }
 
+        Task<PreparedBatch> task = _preparationTask;
+        MessageRequest request = _preparationRequest!;
         try
         {
+            PreparedBatch batch = task.GetAwaiter().GetResult();
+            if (request.Retired || !_viewActive || request.Revision != _messageRevision)
+            {
+                return;
+            }
+
+            if (request.Filter != _config.ProfanityFilter)
+            {
+                _messageQueue.InsertRange(0, request.Messages.Where(n => !_preparationBans.Contains(n.Id)));
+                return;
+            }
+
             bool scrollToEnd = AtEnd();
             float heightLost = 0;
-
-            ChatMessage[] queue = _messageQueue.ToArray();
-            _messageQueue.Clear();
-            foreach (ChatMessage message in queue)
+            foreach (PreparedMessage prepared in batch.Messages)
             {
-                string content;
-                Color color;
-                string messageString = message.Message;
-                string usernameString = message.Username;
-                string? colorString = message.Color;
-                if ((message.Type != MessageType.System && message.Type != MessageType.PrioritySystem) &&
-                    _config.ProfanityFilter)
+                if (!this || !_viewActive || request.Revision != _messageRevision)
                 {
-                    messageString = _profanityFilter.CensorString(messageString);
-                    usernameString = _profanityFilter.CensorString(usernameString);
+                    return;
                 }
 
-                switch (message.Type)
+                ChatMessage message = prepared.Message;
+                if (_preparationBans.Contains(message.Id))
                 {
-                    case MessageType.PrioritySystem:
-                    case MessageType.System:
-                        content = Colorize(messageString, colorString);
-                        color = Color.white;
-                        break;
-
-                    case MessageType.WhisperFrom:
-                        content = $"[From {Colorize(NoParse(usernameString), colorString)}] {NoParse(messageString)}";
-                        color = Color.magenta;
-                        break;
-
-                    case MessageType.WhisperTo:
-                        content = $"[To {Colorize(NoParse(usernameString), colorString)}] {NoParse(messageString)}";
-                        color = Color.magenta;
-                        break;
-
-                    case MessageType.Say:
-                    default:
-                        content = $"[{Colorize(NoParse(usernameString), colorString)}] {NoParse(messageString)}";
-                        color = Color.white;
-                        break;
+                    continue;
                 }
+
+                string content = prepared.Content;
+                Color color = message.Type is MessageType.WhisperFrom or MessageType.WhisperTo
+                    ? Color.magenta
+                    : Color.white;
 
                 if (message.Type == MessageType.PrioritySystem)
                 {
@@ -552,15 +615,149 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
 
                 ScrollLostHeight(scrollToEnd, heightLost);
             }
+
+            if (batch.Error != null)
+            {
+                _log.Error($"Exception while processing message\n{batch.Error}");
+            }
         }
         catch (Exception e)
         {
             _log.Error($"Exception while processing message\n{e}");
         }
+        finally
+        {
+            _preparationBans.Clear();
+            _preparationTask = null;
+            _preparationRequest = null;
+        }
+    }
 
-        return;
+    private void StartPreparation()
+    {
+        if (!_viewActive || _messageQueue.Count == 0)
+        {
+            return;
+        }
 
-        static string NoParse(string message)
+        CultureInfo culture = CultureInfo.CurrentCulture;
+        bool knownCulture = culture.GetType() == typeof(CultureInfo);
+        MessageRequest request = new(
+            _messageQueue.ToArray(),
+            _config.ProfanityFilter,
+            knownCulture ? CultureInfo.ReadOnly((CultureInfo)culture.Clone()) : culture,
+            _messageRevision);
+        Task<PreparedBatch> task = knownCulture ? Task.Factory.StartNew(
+            MessagePreparation.Process,
+            request,
+            CancellationToken.None,
+            TaskCreationOptions.DenyChildAttach,
+            TaskScheduler.Default) : Task.FromResult(MessagePreparation.Process(request));
+        _messageQueue.Clear();
+        _preparationRequest = request;
+        _preparationTask = task;
+    }
+
+    private void RetirePreparation()
+    {
+        _viewActive = false;
+        Interlocked.Increment(ref _messageRevision);
+        if (_preparationRequest != null)
+        {
+            _preparationRequest.Retired = true;
+        }
+
+        // Keep the physical task until completion before starting another batch.
+        _messageQueue.Clear();
+        _preparationBans.Clear();
+    }
+
+    private sealed class MessageRequest(ChatMessage[] messages, bool filter, CultureInfo culture, int revision)
+    {
+        internal readonly ChatMessage[] Messages = messages;
+        internal readonly bool Filter = filter;
+        internal readonly CultureInfo Culture = culture;
+        internal readonly int Revision = revision;
+        internal volatile bool Retired;
+    }
+
+    private readonly struct PreparedMessage(ChatMessage message, string content)
+    {
+        internal ChatMessage Message { get; } = message;
+
+        internal string Content { get; } = content;
+    }
+
+    private sealed class PreparedBatch(PreparedMessage[] messages, Exception? error)
+    {
+        internal PreparedMessage[] Messages { get; } = messages;
+
+        internal Exception? Error { get; } = error;
+    }
+
+    private static class MessagePreparation
+    {
+        private static readonly Lazy<ProfanityFilter.ProfanityFilter> _filter = new(() => new ProfanityFilter.ProfanityFilter());
+
+        internal static PreparedBatch Process(object? state)
+        {
+            MessageRequest request = (MessageRequest)state!;
+            List<PreparedMessage> messages = new(request.Messages.Length);
+            CultureInfo previousCulture = CultureInfo.CurrentCulture;
+            try
+            {
+                CultureInfo.CurrentCulture = request.Culture;
+                foreach (ChatMessage message in request.Messages)
+                {
+                    if (request.Retired)
+                    {
+                        break;
+                    }
+
+                    string content;
+                    string messageString = message.Message;
+                    string usernameString = message.Username;
+                    string? colorString = message.Color;
+                    if (message.Type is not MessageType.System and not MessageType.PrioritySystem && request.Filter)
+                    {
+                        messageString = _filter.Value.CensorString(messageString);
+                        usernameString = _filter.Value.CensorString(usernameString);
+                    }
+
+                    switch (message.Type)
+                    {
+                        case MessageType.PrioritySystem:
+                        case MessageType.System:
+                            content = Colorize(messageString, colorString);
+                            break;
+                        case MessageType.WhisperFrom:
+                            content = $"[From {Colorize(NoParse(usernameString), colorString)}] {NoParse(messageString)}";
+                            break;
+                        case MessageType.WhisperTo:
+                            content = $"[To {Colorize(NoParse(usernameString), colorString)}] {NoParse(messageString)}";
+                            break;
+                        case MessageType.Say:
+                        default:
+                            content = $"[{Colorize(NoParse(usernameString), colorString)}] {NoParse(messageString)}";
+                            break;
+                    }
+
+                    messages.Add(new PreparedMessage(message, content));
+                }
+
+                return new PreparedBatch(messages.ToArray(), null);
+            }
+            catch (Exception error)
+            {
+                return new PreparedBatch(messages.ToArray(), error);
+            }
+            finally
+            {
+                CultureInfo.CurrentCulture = previousCulture;
+            }
+        }
+
+        private static string NoParse(string message)
         {
             StringBuilder stringBuilder = new(message.Length);
             foreach (char c in message)
@@ -578,7 +775,7 @@ internal class EventLobbyChatViewController : BSMLAutomaticViewController
             return stringBuilder.ToString();
         }
 
-        static string Colorize(string message, string? color)
+        private static string Colorize(string message, string? color)
         {
             if (color == null)
             {
