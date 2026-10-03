@@ -99,8 +99,6 @@ internal class NetworkManager : IDisposable
 
     internal event Action<float, float>? PongReceived;
 
-    internal Func<Action<float, float>>? PreparePong { get; set; }
-
     internal event Action<IStageStatus>? StageUpdated;
 
     internal event Action<float>? StartTimeUpdated;
@@ -108,6 +106,8 @@ internal class NetworkManager : IDisposable
     internal event Action? StopLevelReceived;
 
     internal event Action<string>? UserBanned;
+
+    internal Func<Action<float, float>>? PreparePong { get; set; }
 
     internal Status Status { get; private set; } = new();
 
@@ -362,6 +362,7 @@ internal class NetworkManager : IDisposable
                 {
                     return;
                 }
+
                 if (++submissionTry >= AUTH_SUBMISSION_ATTEMPTS)
                 {
                     break;
@@ -478,8 +479,15 @@ internal class NetworkManager : IDisposable
             ReferenceEquals(_client, session.Client) && ReferenceEquals(session.Connection, connection);
     }
 
-    private async Task PublishPacket(ClientSession session, Connection connection, Task previous,
-        Task<PreparedPacket>? preparation, byte opcode, byte[] payload, Action<float, float>? pong, CancellationToken cancelToken)
+    private async Task PublishPacket(
+        ClientSession session,
+        Connection connection,
+        Task previous,
+        Task<PreparedPacket>? preparation,
+        byte opcode,
+        byte[] payload,
+        Action<float, float>? pong,
+        CancellationToken cancelToken)
     {
         try
         {

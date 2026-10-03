@@ -13,6 +13,22 @@ using Synapse.Networking.Models;
 
 namespace Synapse.Extras;
 
+internal readonly struct PreparedPacket
+{
+    internal PreparedPacket(byte opcode, object? value = null, object? second = null)
+    {
+        Opcode = opcode;
+        Value = value;
+        Second = second;
+    }
+
+    internal byte Opcode { get; }
+
+    internal object? Value { get; }
+
+    internal object? Second { get; }
+}
+
 internal static class PacketPreparationWorker
 {
     private static readonly object _gate = new();
@@ -199,20 +215,4 @@ internal static class PacketPreparationWorker
             return property;
         }
     }
-}
-
-internal readonly struct PreparedPacket
-{
-    internal PreparedPacket(byte opcode, object? value = null, object? second = null)
-    {
-        Opcode = opcode;
-        Value = value;
-        Second = second;
-    }
-
-    internal byte Opcode { get; }
-
-    internal object? Value { get; }
-
-    internal object? Second { get; }
 }
