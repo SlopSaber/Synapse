@@ -82,6 +82,11 @@ internal static class LaunchModifierPreparation
         }
     }
 
+    private static class Cache
+    {
+        internal static ConditionalWeakTable<Ruleset, PreparedModifiers> Entries { get; } = new();
+    }
+
     private sealed class PreparedModifiers
     {
         internal PreparedModifiers(string[] strings, bool[] parsed, GameplayModifier[] values)
@@ -96,10 +101,5 @@ internal static class LaunchModifierPreparation
         internal bool[] Parsed { get; }
 
         internal GameplayModifier[] Values { get; }
-    }
-
-    private static class Cache
-    {
-        internal static ConditionalWeakTable<Ruleset, PreparedModifiers> Entries { get; } = new();
     }
 }
