@@ -3,6 +3,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Threading.Tasks;
+using IPA.Utilities.Async;
 using SiraUtil.Logging;
 using Synapse.Extras;
 using Synapse.Networking.Models;
@@ -15,21 +16,27 @@ namespace Synapse.Managers;
 
 internal class CountdownManager : ITickable, IInitializable, IDisposable
 {
-    private static readonly string _folder =
-        Directory.CreateDirectory(
-                (Path.GetDirectoryName(Application.streamingAssetsPath) ?? throw new InvalidOperationException()) +
-                $"{Path.DirectorySeparatorChar}Synapse{Path.DirectorySeparatorChar}Countdown")
-            .FullName;
+    private const int ClipCount = 5;
 
+    private static readonly string _folder = Path.GetFullPath(Path.Combine(
+        Path.GetDirectoryName(Application.streamingAssetsPath) ?? throw new InvalidOperationException(),
+        "Synapse",
+        "Countdown"));
+
+    private readonly AudioClipAsyncLoader _audioClipAsyncLoader;
+    private readonly Task _audioLoad;
+    private readonly AudioClip[] _audioClips = new AudioClip[ClipCount];
+    private readonly string?[] _audioPaths = new string?[ClipCount];
     private readonly SiraLog _log;
     private readonly NetworkManager _networkManager;
     private readonly RainbowString _rainbowString;
     private readonly SongPreviewPlayer _songPreviewPlayer;
     private readonly TimeSyncManager _timeSyncManager;
-    private AudioClip[] _audioClips = null!;
+    private GameObject? _audioObject;
     private AudioSource _countAudioSource = null!;
     private AudioSource _gongAudioSource = null!;
 
+    private bool _disposed;
     private bool _gongPlayed;
 
     private int _lastPlayed;
@@ -51,10 +58,11 @@ internal class CountdownManager : ITickable, IInitializable, IDisposable
         _timeSyncManager = timeSyncManager;
         _songPreviewPlayer = songPreviewPlayer;
         _rainbowString = rainbowString;
+        _audioClipAsyncLoader = audioClipAsyncLoader;
         networkManager.StartTimeUpdated += OnStartTimeUpdated;
         networkManager.Closed += OnClosed;
 
-        _ = LoadAudio(audioClipAsyncLoader);
+        _audioLoad = UnityMainThreadTaskScheduler.Factory.StartNew(LoadAudio).Unwrap();
     }
 
     internal event Action<string>? CountdownUpdated;
@@ -75,14 +83,54 @@ internal class CountdownManager : ITickable, IInitializable, IDisposable
 
     public void Dispose()
     {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
         _networkManager.StartTimeUpdated -= OnStartTimeUpdated;
         _networkManager.Closed -= OnClosed;
+        if (_countAudioSource)
+        {
+            _countAudioSource.Stop();
+            _countAudioSource.clip = null;
+        }
+
+        if (_gongAudioSource)
+        {
+            _gongAudioSource.Stop();
+            _gongAudioSource.clip = null;
+        }
+
+        if (_audioObject)
+        {
+            Object.Destroy(_audioObject);
+            _audioObject = null;
+        }
+
+        for (int i = 0; i < ClipCount; i++)
+        {
+            string? path = _audioPaths[i];
+            if (path != null)
+            {
+                _audioPaths[i] = null;
+                _audioClips[i] = null!;
+                _audioClipAsyncLoader.Unload(path);
+            }
+        }
     }
 
     public void Initialize()
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         AudioMixerGroup outputAudioMixerGroup = _songPreviewPlayer._audioSourcePrefab.outputAudioMixerGroup;
         GameObject gameObject = new("CountdownAudio");
+        _audioObject = gameObject;
         Object.DontDestroyOnLoad(gameObject);
         AudioSource gong = gameObject.AddComponent<AudioSource>();
         gong.outputAudioMixerGroup = outputAudioMixerGroup;
@@ -101,7 +149,7 @@ internal class CountdownManager : ITickable, IInitializable, IDisposable
 
     public void Tick()
     {
-        if (_networkManager.Status.Stage is not PlayStatus playStatus)
+        if (_disposed || _networkManager.Status.Stage is not PlayStatus playStatus)
         {
             return;
         }
@@ -130,16 +178,26 @@ internal class CountdownManager : ITickable, IInitializable, IDisposable
         {
             if (!_gongPlayed)
             {
-                _gongAudioSource.Play();
+                if (_gongAudioSource)
+                {
+                    _gongAudioSource.Play();
+                }
+
                 _gongPlayed = true;
             }
 
             int count = alteredDiff.Seconds - 1;
-            if (count < _audioClips.Length && _lastPlayed != count)
+            if (count >= 0 && count < _audioClips.Length && _lastPlayed != count)
             {
                 _lastPlayed = count;
-                _countAudioSource.clip = _audioClips[count];
-                _countAudioSource.Play();
+                if (_countAudioSource)
+                {
+                    _countAudioSource.clip = _audioClips[count];
+                    if (_audioClips[count])
+                    {
+                        _countAudioSource.Play();
+                    }
+                }
             }
 
             _rainbowString.SetString(alteredDiff.Seconds.ToString());
@@ -150,7 +208,12 @@ internal class CountdownManager : ITickable, IInitializable, IDisposable
             _levelStarted = true;
             if (playStatus.PlayerScore == null)
             {
-                LevelStarted?.Invoke();
+                NotifyLevelStarted();
+            }
+
+            if (_disposed)
+            {
+                return;
             }
 
             _rainbowString.SetString("Now");
@@ -160,8 +223,13 @@ internal class CountdownManager : ITickable, IInitializable, IDisposable
 
     internal void ManualStart()
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         _levelStarted = true;
-        LevelStarted?.Invoke();
+        NotifyLevelStarted();
     }
 
     internal void Refresh()
@@ -169,34 +237,39 @@ internal class CountdownManager : ITickable, IInitializable, IDisposable
         _lastSent = string.Empty;
     }
 
-    private async Task LoadAudio(AudioClipAsyncLoader audioClipAsyncLoader)
+    private async Task LoadAudio()
     {
         try
         {
-            // idk how to read these from memory
             const string prefix = "Synapse.Resources.Countdown.";
-            const int count = 5;
             Assembly assembly = typeof(CountdownManager).Assembly;
-            _audioClips = new AudioClip[count];
-            for (int i = 0; i < count; i++)
+            for (int i = 0; i < ClipCount && !_disposed; i++)
             {
                 string fileName = $"{i + 1}.ogg";
                 string audio = $"{prefix}{fileName}";
-                string path = Path.Combine(_folder, fileName);
-                if (!File.Exists(path))
+                string path = await CountdownFileWorker.Prepare(assembly, audio, _folder, fileName);
+                if (_disposed)
                 {
-                    using Stream resource = assembly.GetManifestResourceStream(audio) ??
-                                            throw new InvalidOperationException();
-                    using FileStream file = new(path, FileMode.Create, FileAccess.Write);
-                    await resource.CopyToAsync(file);
+                    return;
                 }
 
-                _audioClips[i] = await audioClipAsyncLoader.Load(path);
+                AudioClip clip = await _audioClipAsyncLoader.Load(path);
+                if (_disposed)
+                {
+                    _audioClipAsyncLoader.Unload(path);
+                    return;
+                }
+
+                _audioPaths[i] = path;
+                _audioClips[i] = clip;
             }
         }
         catch (Exception e)
         {
-            _log.Error($"Exception while loading countdown audio\n{e}");
+            if (!_disposed)
+            {
+                _log.Error($"Exception while loading countdown audio\n{e}");
+            }
         }
     }
 
@@ -212,12 +285,45 @@ internal class CountdownManager : ITickable, IInitializable, IDisposable
 
     private void Send(string text)
     {
-        if (text == _lastSent)
+        if (_disposed || text == _lastSent)
         {
             return;
         }
 
         _lastSent = text;
-        CountdownUpdated?.Invoke(text);
+        Action<string>? updated = CountdownUpdated;
+        if (updated == null)
+        {
+            return;
+        }
+
+        foreach (Action<string> handler in updated.GetInvocationList())
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            handler(text);
+        }
+    }
+
+    private void NotifyLevelStarted()
+    {
+        Action? started = LevelStarted;
+        if (_disposed || started == null)
+        {
+            return;
+        }
+
+        foreach (Action handler in started.GetInvocationList())
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            handler();
+        }
     }
 }
