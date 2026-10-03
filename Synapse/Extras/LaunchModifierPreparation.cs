@@ -84,6 +84,11 @@ internal static class LaunchModifierPreparation
 
     private static class Cache
     {
+        // Keep initialization failures inside the optional fallback calls.
+        static Cache()
+        {
+        }
+
         internal static ConditionalWeakTable<Ruleset, PreparedModifiers> Entries { get; } = new();
     }
 
