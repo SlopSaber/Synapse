@@ -127,13 +127,24 @@ internal static class PacketPreparationWorker
                 ClientOpcode.UserBanned => new PreparedPacket(opcode, reader.ReadString()),
             ClientOpcode.PlayerCount => new PreparedPacket(opcode, reader.ReadUInt16(), reader.ReadUInt16()),
             ClientOpcode.Ping => new PreparedPacket(opcode, reader.ReadSingle(), reader.ReadSingle()),
-            ClientOpcode.Status => new PreparedPacket(opcode, Deserialize<Status>(reader.ReadString(), controlledJson)),
+            ClientOpcode.Status => new PreparedPacket(opcode, DeserializeStatus(reader.ReadString(), controlledJson)),
             ClientOpcode.ChatMessage => new PreparedPacket(opcode, Deserialize<ChatMessage>(reader.ReadString(), controlledJson)),
             ClientOpcode.AcknowledgeScore => new PreparedPacket(opcode, reader.ReadByte(), reader.ReadInt32()),
             ClientOpcode.InvalidateScores => new PreparedPacket(opcode, reader.ReadByte()),
             ClientOpcode.LeaderboardScores => new PreparedPacket(opcode, Deserialize<LeaderboardScores>(reader.ReadString(), controlledJson)),
             _ => new PreparedPacket(opcode)
         };
+    }
+
+    private static Status? DeserializeStatus(string json, bool controlled)
+    {
+        Status? status = Deserialize<Status>(json, controlled);
+        if (controlled)
+        {
+            LaunchModifierPreparation.Prepare(status);
+        }
+
+        return status;
     }
 
     private static T? Deserialize<T>(string json, bool controlled)

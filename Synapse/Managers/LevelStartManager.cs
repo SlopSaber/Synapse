@@ -4,10 +4,12 @@ using HarmonyLib;
 using IPA.Loader;
 using JetBrains.Annotations;
 using SiraUtil.Logging;
+using Synapse.Extras;
 using Synapse.HarmonyPatches;
 using Synapse.Models;
 using Synapse.Networking.Models;
 using Zenject;
+using GameplayModifier = Synapse.Extras.LaunchModifierPreparation.GameplayModifier;
 
 namespace Synapse.Managers;
 
@@ -105,26 +107,6 @@ internal class LevelStartManager : IDisposable
         }
     }
 
-#pragma warning disable SA1300
-    // ReSharper disable InconsistentNaming
-    private enum GameplayModifier
-    {
-        noFailOn0Energy,
-        instaFail,
-        failOnSaberClash,
-        noBombs,
-        fastNotes,
-        strictAngles,
-        disappearingArrows,
-        noArrows,
-        ghostNotes,
-        proMode,
-        zenMode,
-        smallCubes,
-        noEnergy // custom modifier
-    }
-#pragma warning restore SA1300
-
     public void Dispose()
     {
         _networkManager.MapUpdated -= OnMapUpdated;
@@ -159,9 +141,19 @@ internal class LevelStartManager : IDisposable
         GameplayModifiers modifiers = new();
         if (_ruleset is { Modifiers: not null })
         {
-            foreach (string rulesetModifier in _ruleset.Modifiers)
+            Ruleset ruleset = _ruleset;
+            string[] rulesetModifiers = ruleset.Modifiers!;
+            for (int index = 0; index < rulesetModifiers.Length; index++)
             {
-                if (!Enum.TryParse(rulesetModifier, true, out GameplayModifier modifier))
+                string rulesetModifier = rulesetModifiers[index];
+                bool parsed;
+                GameplayModifier modifier;
+                if (!LaunchModifierPreparation.TryGet(ruleset, index, rulesetModifier, out parsed, out modifier))
+                {
+                    parsed = Enum.TryParse(rulesetModifier, true, out modifier);
+                }
+
+                if (!parsed)
                 {
                     continue;
                 }
