@@ -189,6 +189,12 @@ internal class MenuPrefabManager : IDisposable
         return completion.Task;
     }
 
+    internal void Hide()
+    {
+        _active = false;
+        Refresh();
+    }
+
     internal void Show()
     {
         _active = true;
@@ -351,12 +357,6 @@ internal class MenuPrefabManager : IDisposable
             publicationStarted = true;
             Invoke(request.Revision, true, publishingCallbacks);
         }
-    }
-
-    internal void Hide()
-    {
-        _active = false;
-        Refresh();
     }
 
     private async Task LoadBundle(DownloadRequest request, string path)
