@@ -72,8 +72,8 @@ internal class PromoManager : IInitializable, ITickable, IDisposable
 
     public void Dispose()
     {
-        _listingManager.ListingFound += OnListingFound;
-        _listingManager.BannerImageCreated += OnBannerImageCreated;
+        _listingManager.ListingFound -= OnListingFound;
+        _listingManager.BannerImageCreated -= OnBannerImageCreated;
     }
 
     public void Initialize()
