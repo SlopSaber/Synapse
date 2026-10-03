@@ -264,7 +264,20 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
                 return;
             }
 
-            handler(map);
+            try
+            {
+                handler(map);
+            }
+            catch (Exception exception)
+            {
+                try
+                {
+                    _log.Error($"Error handling downloaded map [{map.Map.Name}]\n{exception}");
+                }
+                catch
+                {
+                }
+            }
         }
     }
 
