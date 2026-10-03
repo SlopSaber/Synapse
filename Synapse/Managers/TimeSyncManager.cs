@@ -21,13 +21,14 @@ internal class TimeSyncManager : IDisposable
     private CancellationTokenSource _cancelPingTimeout = new();
 
     private bool? _didSyncSucceed;
+    private bool _disposed;
     private TaskCompletionSource<object?>? _pingTask;
 
     private TimeSyncManager(NetworkManager networkManager, CancellationTokenManager cancellationTokenManager)
     {
         _networkManager = networkManager;
         _cancellationTokenManager = cancellationTokenManager;
-        networkManager.PongReceived += Pong;
+        networkManager.PreparePong += CapturePong;
         networkManager.Connecting += OnConnecting;
         networkManager.Disconnected += OnDisconnected;
     }
@@ -60,7 +61,8 @@ internal class TimeSyncManager : IDisposable
 
     public void Dispose()
     {
-        _networkManager.PongReceived -= Pong;
+        _disposed = true;
+        _networkManager.PreparePong -= CapturePong;
         _networkManager.Connecting -= OnConnecting;
         _networkManager.Disconnected -= OnDisconnected;
         _cancellationTokenManager.Dispose();
@@ -122,11 +124,23 @@ internal class TimeSyncManager : IDisposable
         }
     }
 
-    private void Pong(float sentLocalTime, float serverTime)
+    private Action<float, float> CapturePong()
     {
-        float roundTrip = ElapsedSeconds - sentLocalTime;
-        _serverOffset.Update(serverTime - ElapsedSeconds);
-        UpdateLatency(roundTrip * 0.5f);
+        float localTime = ElapsedSeconds;
+        float offsetTime = ElapsedSeconds;
+        TaskCompletionSource<object?>? ping = _pingTask;
+        CancellationTokenSource timeout = _cancelPingTimeout;
+        return (sentLocalTime, serverTime) =>
+        {
+            if (_disposed || !ReferenceEquals(_pingTask, ping) || !ReferenceEquals(_cancelPingTimeout, timeout))
+            {
+                return;
+            }
+
+            float roundTrip = localTime - sentLocalTime;
+            _serverOffset.Update(serverTime - offsetTime);
+            UpdateLatency(roundTrip * 0.5f);
+        };
     }
 
     private async Task Timeout(int milliseconds, CancellationToken cancellationToken)

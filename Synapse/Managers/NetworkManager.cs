@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
@@ -6,7 +6,6 @@ using System.Net;
 using System.Threading;
 using System.Threading.Tasks;
 using JetBrains.Annotations;
-using Newtonsoft.Json;
 using SiraUtil.Logging;
 using Synapse.Extras;
 using Synapse.Networking;
@@ -45,6 +44,7 @@ internal class NetworkManager : IDisposable
 
     private string _address = string.Empty;
     private AsyncTcpClient? _client;
+    private ClientSession? _session;
     private bool _authenticated;
 
     [UsedImplicitly]
@@ -98,6 +98,8 @@ internal class NetworkManager : IDisposable
     internal event Action<int, int>? PlayerCountUpdated;
 
     internal event Action<float, float>? PongReceived;
+
+    internal Func<Action<float, float>>? PreparePong { get; set; }
 
     internal event Action<IStageStatus>? StageUpdated;
 
@@ -209,10 +211,13 @@ internal class NetworkManager : IDisposable
         _address = $"{address}:{port}";
         using AsyncTcpLocalClient client = new(address, port, 3);
         _log.Info($"Connecting to {_address}");
-        client.Message += OnMessageReceived;
-        client.ConnectedCallback = OnConnected;
-        client.ReceivedCallback = OnReceived;
+        ClientSession session = new(client);
+        EventHandler<AsyncTcpMessageEventArgs> messages = (sender, args) => OnMessageReceived(session, sender, args);
+        client.Message += messages;
+        client.ConnectedCallback = token => OnConnected(session, token);
+        client.ReceivedCallback = (opcode, reader, token) => OnReceived(session, opcode, reader, token);
         _client = client;
+        _session = session;
         try
         {
             await client.RunAsync();
@@ -222,20 +227,33 @@ internal class NetworkManager : IDisposable
         }
         catch (AsyncTcpFailedAfterRetriesException e)
         {
-            await Disconnect($"Connection failed after {e.ReconnectTries} tries", e.InnerException);
+            if (ReferenceEquals(_client, client))
+            {
+                await Disconnect($"Connection failed after {e.ReconnectTries} tries", e.InnerException);
+            }
         }
         catch (AsyncTcpSocketException e)
         {
-            await Disconnect(DisconnectCode.ConnectionClosedUnexpectedly, e, false);
+            if (ReferenceEquals(_client, client))
+            {
+                await Disconnect(DisconnectCode.ConnectionClosedUnexpectedly, e, false);
+            }
         }
         catch (Exception e)
         {
-            await Disconnect(DisconnectCode.UnexpectedException, e, false);
+            if (ReferenceEquals(_client, client))
+            {
+                await Disconnect(DisconnectCode.UnexpectedException, e, false);
+            }
         }
 
-        client.Message -= OnMessageReceived;
+        client.Message -= messages;
         client.ConnectedCallback = null;
         client.ReceivedCallback = null;
+        if (ReferenceEquals(_session, session) && _client == null)
+        {
+            _session = null;
+        }
     }
 
     private async Task<AuthenticationToken?> GetToken()
@@ -273,11 +291,17 @@ internal class NetworkManager : IDisposable
             accessToken.token);
     }
 
-    private async Task OnConnected(CancellationToken cancelToken)
+    private async Task OnConnected(ClientSession session, CancellationToken cancelToken)
     {
+        Connection connection = session.Connection;
+        if (!IsCurrent(session, connection, cancelToken))
+        {
+            return;
+        }
+
         try
         {
-            if (_client is not { IsConnected: true })
+            if (!session.Client.IsConnected)
             {
                 throw new InvalidOperationException("Client not connected.");
             }
@@ -285,24 +309,32 @@ internal class NetworkManager : IDisposable
             _log.Debug($"Successfully connected to {_address}");
             Connecting?.Invoke(ConnectingStage.Authenticating, -1);
 
-            _ = SubmitAuth(cancelToken);
+            _ = SubmitAuth(session, connection, cancelToken);
         }
         catch (Exception e)
         {
-            await Disconnect(DisconnectCode.UnexpectedException, e);
+            if (IsCurrent(session, connection, CancellationToken.None))
+            {
+                await Disconnect(DisconnectCode.UnexpectedException, e);
+            }
         }
     }
 
-    private async Task SubmitAuth(CancellationToken cancelToken)
+    private async Task SubmitAuth(ClientSession session, Connection connection, CancellationToken cancelToken)
     {
         try
         {
-            if (_client is not { IsConnected: true })
+            if (!session.Client.IsConnected)
             {
                 throw new InvalidOperationException("Client not connected.");
             }
 
             AuthenticationToken? authTokenResult = await _tokenTask;
+            if (!IsCurrent(session, connection, cancelToken))
+            {
+                return;
+            }
+
             if (authTokenResult == null)
             {
                 await Disconnect(DisconnectCode.Unauthenticated);
@@ -321,11 +353,15 @@ internal class NetworkManager : IDisposable
             byte[] bytes = packetBuilder.ToBytes();
 
             int submissionTry = 0;
-            while (!cancelToken.IsCancellationRequested)
+            while (IsCurrent(session, connection, cancelToken))
             {
-                await _client.Send(bytes, cancelToken);
+                await session.Client.Send(bytes, cancelToken);
                 await Task.Delay(AUTH_SUBMISSION_INTERVAL, cancelToken);
                 cancelToken.ThrowIfCancellationRequested();
+                if (!IsCurrent(session, connection, cancelToken))
+                {
+                    return;
+                }
                 if (++submissionTry >= AUTH_SUBMISSION_ATTEMPTS)
                 {
                     break;
@@ -340,7 +376,7 @@ internal class NetworkManager : IDisposable
                 _queuedPackets.Clear();
                 foreach (byte[] data in queued)
                 {
-                    _ = _client.Send(data, cancelToken);
+                    _ = session.Client.Send(data, cancelToken);
                 }
 
                 return;
@@ -350,12 +386,29 @@ internal class NetworkManager : IDisposable
         }
         catch (Exception e)
         {
-            await Disconnect(DisconnectCode.UnexpectedException, e);
+            if (IsCurrent(session, connection, CancellationToken.None))
+            {
+                await Disconnect(DisconnectCode.UnexpectedException, e);
+            }
         }
     }
 
-    private void OnMessageReceived(object _, AsyncTcpMessageEventArgs args)
+    private void OnMessageReceived(ClientSession session, object? sender, AsyncTcpMessageEventArgs args)
     {
+        if (!ReferenceEquals(_session, session) || !ReferenceEquals(sender, session.Client))
+        {
+            return;
+        }
+
+        if (args.Message is Message.Connecting or Message.ConnectionClosed)
+        {
+            session.Connection = new Connection();
+            if (args.Message == Message.Connecting)
+            {
+                _authenticated = false;
+            }
+        }
+
         if (args.Exception != null)
         {
             _log.Error($"{args.Message}\n{args.Exception}");
@@ -401,8 +454,71 @@ internal class NetworkManager : IDisposable
         }
     }
 
-    private async Task OnReceived(byte opcode, BinaryReader reader, CancellationToken cancelToken)
+    private Task OnReceived(ClientSession session, byte opcode, BinaryReader reader, CancellationToken cancelToken)
     {
+        Connection connection = session.Connection;
+        if (!IsCurrent(session, connection, cancelToken))
+        {
+            return Task.CompletedTask;
+        }
+
+        Action<float, float>? pong = (ClientOpcode)opcode == ClientOpcode.Ping ? PreparePong?.Invoke() : null;
+        byte[] payload = reader.ReadBytes(checked((int)(reader.BaseStream.Length - reader.BaseStream.Position)));
+        Task<PreparedPacket>? preparation = PacketPreparationWorker.CanPrepare
+            ? PacketPreparationWorker.ParseAsync(opcode, payload)
+            : null;
+        Task publication = PublishPacket(session, connection, connection.Publication, preparation, opcode, payload, pong, cancelToken);
+        connection.Publication = publication;
+        return publication;
+    }
+
+    private bool IsCurrent(ClientSession session, Connection connection, CancellationToken token)
+    {
+        return !token.IsCancellationRequested && ReferenceEquals(_session, session) &&
+            ReferenceEquals(_client, session.Client) && ReferenceEquals(session.Connection, connection);
+    }
+
+    private async Task PublishPacket(ClientSession session, Connection connection, Task previous,
+        Task<PreparedPacket>? preparation, byte opcode, byte[] payload, Action<float, float>? pong, CancellationToken cancelToken)
+    {
+        try
+        {
+            await previous;
+        }
+        catch (Exception)
+        {
+        }
+
+        if (!IsCurrent(session, connection, cancelToken))
+        {
+            if (preparation != null)
+            {
+                try
+                {
+                    await preparation;
+                }
+                catch (Exception)
+                {
+                }
+            }
+
+            return;
+        }
+
+        PreparedPacket packet = preparation != null
+            ? await preparation
+            : PacketPreparationWorker.ParseOnCaller(opcode, payload);
+        if (!IsCurrent(session, connection, cancelToken))
+        {
+            return;
+        }
+
+        await ApplyPacket(packet, pong);
+    }
+
+    private async Task ApplyPacket(PreparedPacket packet, Action<float, float>? pong)
+    {
+        byte opcode = packet.Opcode;
         switch ((ClientOpcode)opcode)
         {
             case ClientOpcode.Authenticated:
@@ -425,7 +541,7 @@ internal class NetworkManager : IDisposable
 
             case ClientOpcode.Disconnect:
             {
-                DisconnectCode disconnectCode = (DisconnectCode)reader.ReadByte();
+                DisconnectCode disconnectCode = (DisconnectCode)packet.Value!;
                 if (disconnectCode == DisconnectCode.ListingMismatch)
                 {
                     _listingManager.Clear();
@@ -438,28 +554,28 @@ internal class NetworkManager : IDisposable
 
             case ClientOpcode.RefusedPacket:
             {
-                string refusal = reader.ReadString();
+                string refusal = (string)packet.Value!;
                 _log.Warn($"Packet refused by server ({refusal})");
 
                 break;
             }
 
             case ClientOpcode.PlayerCount:
-                ushort chatterCount = reader.ReadUInt16();
-                ushort totalCount = reader.ReadUInt16();
+                ushort chatterCount = (ushort)packet.Value!;
+                ushort totalCount = (ushort)packet.Second!;
                 PlayerCountUpdated?.Invoke(chatterCount, totalCount);
                 break;
 
             case ClientOpcode.Ping:
-                float clientTime = reader.ReadSingle();
-                float serverTime = reader.ReadSingle();
+                float clientTime = (float)packet.Value!;
+                float serverTime = (float)packet.Second!;
+                pong?.Invoke(clientTime, serverTime);
                 PongReceived?.Invoke(clientTime, serverTime);
                 break;
 
             case ClientOpcode.Status:
             {
-                string fullStatus = reader.ReadString();
-                Status status = JsonConvert.DeserializeObject<Status>(fullStatus, JsonSettings.Settings)!;
+                Status status = (Status)packet.Value!;
                 Status lastStatus = Status;
                 Status = status;
 
@@ -541,15 +657,14 @@ internal class NetworkManager : IDisposable
 
             case ClientOpcode.ChatMessage:
             {
-                string message = reader.ReadString();
-                ChatReceived?.Invoke(JsonConvert.DeserializeObject<ChatMessage>(message, JsonSettings.Settings));
+                ChatReceived?.Invoke((ChatMessage)packet.Value!);
 
                 break;
             }
 
             case ClientOpcode.UserJoin:
             {
-                string username = reader.ReadString();
+                string username = (string)packet.Value!;
                 JoinLeaveReceived?.Invoke(true, username);
 
                 break;
@@ -557,7 +672,7 @@ internal class NetworkManager : IDisposable
 
             case ClientOpcode.UserLeave:
             {
-                string username = reader.ReadString();
+                string username = (string)packet.Value!;
                 JoinLeaveReceived?.Invoke(false, username);
 
                 break;
@@ -565,7 +680,7 @@ internal class NetworkManager : IDisposable
 
             case ClientOpcode.UserBanned:
             {
-                string message = reader.ReadString();
+                string message = (string)packet.Value!;
                 UserBanned?.Invoke(message);
 
                 break;
@@ -573,8 +688,8 @@ internal class NetworkManager : IDisposable
 
             case ClientOpcode.AcknowledgeScore:
             {
-                byte index = reader.ReadByte();
-                int score = reader.ReadInt32();
+                byte index = (byte)packet.Value!;
+                int score = (int)packet.Second!;
                 AcknowledgedScores[index] = score;
 
                 break;
@@ -582,7 +697,7 @@ internal class NetworkManager : IDisposable
 
             case ClientOpcode.InvalidateScores:
             {
-                byte index = reader.ReadByte();
+                byte index = (byte)packet.Value!;
                 InvalidateScores?.Invoke(index);
 
                 break;
@@ -590,9 +705,7 @@ internal class NetworkManager : IDisposable
 
             case ClientOpcode.LeaderboardScores:
             {
-                string message = reader.ReadString();
-                LeaderboardReceived?.Invoke(
-                    JsonConvert.DeserializeObject<LeaderboardScores>(message, JsonSettings.Settings)!);
+                LeaderboardReceived?.Invoke((LeaderboardScores)packet.Value!);
 
                 break;
             }
@@ -605,5 +718,22 @@ internal class NetworkManager : IDisposable
                 _log.Warn($"Unhandled opcode: ({opcode})");
                 return;
         }
+    }
+
+    private sealed class ClientSession
+    {
+        internal ClientSession(AsyncTcpClient client)
+        {
+            Client = client;
+        }
+
+        internal AsyncTcpClient Client { get; }
+
+        internal Connection Connection { get; set; } = new();
+    }
+
+    private sealed class Connection
+    {
+        internal Task Publication { get; set; } = Task.CompletedTask;
     }
 }
