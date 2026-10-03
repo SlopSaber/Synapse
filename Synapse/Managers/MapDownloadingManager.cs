@@ -2,7 +2,6 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
-using System.Security.Cryptography;
 using System.Threading;
 using System.Threading.Tasks;
 using IPA.Utilities.Async;
@@ -25,12 +24,19 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
     private readonly SiraLog _log;
     private readonly CustomLevelLoader _customLevelLoader;
     private readonly NetworkManager _networkManager;
+    private readonly ListingManager _listingManager;
 #if !PRE_V1_37_1
     private readonly BeatmapLevelsModel _beatmapLevelsModel;
 #endif
     private readonly CancellationTokenManager _cancellationTokenManager;
     private readonly SongCoreLoader? _songCoreLoader;
     private readonly DirectoryInfo _tmp;
+    private readonly Task<MapFileWorker.Result> _initialization;
+    private static string? _sessionTempName;
+    private Task? _pipeline;
+    private MapContext? _current;
+    private bool _disposed;
+    private bool _initializationObserved;
 
     private string _lastSent = string.Empty;
     private string? _error;
@@ -50,11 +56,13 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
 #endif
         Config config,
         CancellationTokenManager cancellationTokenManager,
+        ListingManager listingManager,
         [InjectOptional] SongCoreLoader? songCoreLoader)
     {
         _log = log;
         _customLevelLoader = customLevelLoader;
         _networkManager = networkManager;
+        _listingManager = listingManager;
 #if !PRE_V1_37_1
         _beatmapLevelsModel = beatmapLevelsModel;
 #endif
@@ -63,28 +71,21 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
         networkManager.MapUpdated += OnMapUpdated;
         networkManager.Closed += OnClosed;
 
-        string? oldTemp = config.Temp;
-        if (!string.IsNullOrEmpty(oldTemp))
+        string? oldRoot = null;
+        if (_sessionTempName == null)
         {
-            DirectoryInfo oldTempDirectory = new(Path.Combine(Path.GetTempPath(), oldTemp));
-            if (oldTempDirectory.Exists)
+            if (Guid.TryParse(config.Temp, out _) && config.Temp != null)
             {
-                oldTempDirectory.Delete(true);
+                oldRoot = Path.GetFullPath(Path.Combine(Path.GetTempPath(), config.Temp));
             }
+
+            _sessionTempName = Guid.NewGuid().ToString();
         }
 
-        string guid = Guid.NewGuid().ToString();
-        config.Temp = guid;
-        _tmp = new DirectoryInfo(Path.Combine(Path.GetTempPath(), guid));
-        _tmp.Create();
-
-        DirectoryInfo directory = new(_mapFolder);
-        directory.Create();
-        FileInfo jokeFile = new(Path.Combine(directory.FullName, "README.txt"));
-        if (!jokeFile.Exists)
-        {
-            File.WriteAllText(jokeFile.FullName, "you wouldn't happen to be trying to steal maps, would you?");
-        }
+        // Published levels retain file-backed media for the process lifetime.
+        config.Temp = _sessionTempName;
+        _tmp = new DirectoryInfo(Path.Combine(Path.GetTempPath(), _sessionTempName));
+        _initialization = MapFileWorker.Initialize(oldRoot, _tmp.FullName, Path.GetFullPath(_mapFolder));
     }
 
     public event Action<string>? ProgressUpdated;
@@ -126,13 +127,37 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
 
     public void Dispose()
     {
+        _disposed = true;
         _networkManager.MapUpdated -= OnMapUpdated;
         _networkManager.Closed -= OnClosed;
-        DeleteTemp();
+        _cancellationTokenManager.Cancel();
+        _current = null;
+        _beatmapLevel = null;
+        MapDownloadedBacking = null;
+        MapDownloadedOnceBacking = null;
     }
 
     public void Tick()
     {
+        if (!_initializationObserved && _initialization.IsCompleted)
+        {
+            _initializationObserved = true;
+            try
+            {
+                LogWarnings(_initialization.GetAwaiter().GetResult());
+            }
+            catch (Exception exception)
+            {
+                _log.Error($"Error preparing map directories\n{exception}");
+                _error = "ERROR!";
+            }
+        }
+
+        if (_current != null && IsCurrent(_current))
+        {
+            _downloadProgress = _current.Progress.Value;
+        }
+
         string text;
         if (_error != null)
         {
@@ -155,114 +180,203 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
 
     internal static void PurgeCache()
     {
-        new DirectoryInfo(_mapFolder).Purge();
+        _ = ObservePurge(MapFileWorker.Purge(Path.GetFullPath(_mapFolder)));
     }
 
     internal void Cancel()
     {
         _cancellationTokenManager.Cancel();
+        if (_current is { Committed: false })
+        {
+            _current = null;
+        }
     }
 
-    private void DeleteTemp()
+    private static async Task ObservePurge(Task<MapFileWorker.Result> work)
     {
-        if (Directory.Exists(_tmp.FullName))
+        try
         {
-            _tmp.Delete(true);
+            MapFileWorker.Result result = await work;
+            foreach ((string path, Exception error) in result.Warnings)
+            {
+                Plugin.Log.Error($"Exception while purging directory: [{path}]\n{error}");
+            }
+        }
+        catch (Exception exception)
+        {
+            Plugin.Log.Error($"Exception while purging directory: [{_mapFolder}]\n{exception}");
         }
     }
 
     private void OnMapUpdated(int index, Map map)
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         MapDownloadedOnceBacking = null;
         _beatmapLevel = null;
-
-        string mapName = Path.GetInvalidFileNameChars().Aggregate(map.Name, (current, c) => current.Replace(c, '_'));
         CancellationToken token = _cancellationTokenManager.Reset();
-        UnityMainThreadTaskScheduler.Factory.StartNew(
-            async () =>
-            {
-                int i = 1;
-                while (true)
-                {
-                    try
-                    {
-                        _tmp.Purge();
-                        await Download(index, map, mapName, token);
-                        return;
-                    }
-                    catch (TaskCanceledException)
-                    {
-                        return;
-                    }
-                    catch
-                    {
-                        await Task.Delay((++i) * 1000, token);
-                    }
-                }
-            },
-            token);
+        MapContext context = new(index, map, _listingManager.Listing, token);
+        _current = context;
+        Task previous = _pipeline ?? Task.CompletedTask;
+        _pipeline = context.Completion.Task;
+        _ = UnityMainThreadTaskScheduler.Factory.StartNew(() => RunPipeline(context, previous), CancellationToken.None).Unwrap();
     }
 
     private void OnClosed()
     {
-        DeleteTemp();
         _cancellationTokenManager.Cancel();
+        _current = null;
+        _beatmapLevel = null;
+        MapDownloadedOnceBacking = null;
     }
 
-    private async Task Download(int index, Map map, string mapName, CancellationToken token)
+    private bool IsCurrent(MapContext context) => !_disposed && ReferenceEquals(_current, context) &&
+        ReferenceEquals(_listingManager.Listing, context.Listing) && !context.Token.IsCancellationRequested;
+
+    private bool IsPublicationCurrent(MapContext context) => !_disposed && ReferenceEquals(_current, context) &&
+        ReferenceEquals(_listingManager.Listing, context.Listing);
+
+    private void RequireCurrent(MapContext context)
     {
+        if (!IsCurrent(context))
+        {
+            throw new OperationCanceledException(context.Token);
+        }
+    }
+
+    private void LogWarnings(MapFileWorker.Result result)
+    {
+        foreach ((string path, Exception error) in result.Warnings)
+        {
+            _log.Error($"Exception while purging directory: [{path}]\n{error}");
+        }
+    }
+
+    private async Task RunPipeline(MapContext context, Task previous)
+    {
+        try
+        {
+            await previous;
+            await _initialization;
+            RequireCurrent(context);
+            int retry = 1;
+            while (IsCurrent(context))
+            {
+                try
+                {
+                    await Download(context);
+                    return;
+                }
+                catch (OperationCanceledException)
+                {
+                    return;
+                }
+                catch
+                {
+                    RequireCurrent(context);
+                    await Task.Delay((++retry) * 1000, context.Token);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (Exception exception)
+        {
+            if (IsCurrent(context))
+            {
+                _log.Error($"Error preparing map [{context.Map.Name}]\n{exception}");
+                _error = "ERROR!";
+            }
+        }
+        finally
+        {
+            await CleanupAttempt(context);
+            context.Completion.TrySetResult(true);
+        }
+    }
+
+    private async Task CleanupAttempt(MapContext context)
+    {
+        if (context.AttemptPath == null || context.NativeExposed)
+        {
+            return;
+        }
+
+        try
+        {
+            await MapFileWorker.Delete(context.AttemptPath);
+            context.AttemptPath = null;
+        }
+        catch (Exception exception)
+        {
+            _log.Error($"Error cleaning map directory [{context.AttemptPath}]\n{exception}");
+        }
+    }
+
+    private async Task Download(MapContext context)
+    {
+        RequireCurrent(context);
+        await CleanupAttempt(context);
+        RequireCurrent(context);
+        int index = context.Index;
+        Map map = context.Map;
+        CancellationToken token = context.Token;
         _error = null;
         _lastProgress = 0;
         _downloadProgress = 0;
-        string unzipPath = _tmp.FullName;
-        string path = Path.Combine(_mapFolder, mapName);
-        FileInfo cacheAes = new(path + ".aes");
-        FileInfo cacheZip = new(path + ".zip");
+        context.Progress.Set(0);
+        string unzipPath = Path.GetFullPath(Path.Combine(_tmp.FullName, Guid.NewGuid().ToString()));
+        context.AttemptPath = unzipPath;
+        context.NativeExposed = false;
         try
         {
             Download download =
                 map.Downloads.FirstOrDefault(n => n.GameVersion.MatchesGameVersion()) ??
                 throw new InvalidOperationException($"No download found for game version [{Plugin.GameVersion}].");
             string url = download.Url;
-
-            if (!cacheAes.Exists && !cacheZip.Exists)
+            string name = map.Name;
+            string? key = download.Key;
+            MapFileWorker.Result files = await MapFileWorker.Extract(_mapFolder, name, unzipPath, key, null, context.Progress, token);
+            RequireCurrent(context);
+            if (!files.Found)
             {
                 _log.Debug($"Attempting to download [{map.Name}] from [{url}]");
-                using MemoryStream stream = await MediaExtensions.DownloadHash(
+                MemoryStream stream = await MediaExtensions.DownloadHash(
                     url,
                     download.Hash,
-                    n => _downloadProgress = n * 0.95f,
+                    value =>
+                    {
+                        if (IsCurrent(context))
+                        {
+                            context.Progress.Set(value * 0.95f);
+                        }
+                    },
                     token);
-                bool decrypt = !string.IsNullOrEmpty(download.Key);
-                using FileStream fs = new(decrypt ? cacheAes.FullName : cacheZip.FullName, FileMode.CreateNew);
-                await stream.CopyToAsync(fs);
-                cacheZip.Refresh();
-                cacheAes.Refresh();
-            }
-
-            if (cacheAes.Exists)
-            {
-                if (download.Key == null)
+                try
                 {
-                    throw new InvalidOperationException($"[{map.Name}] was encrypted but no key provided.");
+                    RequireCurrent(context);
+                }
+                catch
+                {
+                    stream.Dispose();
+                    throw;
                 }
 
-                _log.Debug($"Decrypting [{map.Name}]");
-                using FileStream stream = new(cacheAes.FullName, FileMode.Open);
-                using CryptoStream cryptoStream = await MediaExtensions.Decrypt(stream, download.Key);
-                await MediaExtensions.Unzip(cryptoStream, _tmp.FullName, n => _downloadProgress = 0.95f + (n * 0.02f));
-            }
-            else if (cacheZip.Exists)
-            {
-                using FileStream stream = new(cacheZip.FullName, FileMode.Open);
-                await MediaExtensions.Unzip(stream, _tmp.FullName, n => _downloadProgress = 0.95f + (n * 0.02f));
-            }
-            else
-            {
-                throw new InvalidOperationException($"Could not find [{map.Name}] in cache.");
+                files = await MapFileWorker.Extract(_mapFolder, name, unzipPath, key, stream, context.Progress, token);
+                RequireCurrent(context);
+                if (!files.Found)
+                {
+                    throw new InvalidOperationException($"Could not find [{map.Name}] in cache.");
+                }
             }
 
             _downloadProgress = 0.98f;
+            context.Progress.Set(0.98f);
+            context.NativeExposed = true;
 #if !PRE_V1_37_1
             BeatmapLevel beatmapLevel;
             if (_songCoreLoader != null)
@@ -274,14 +388,18 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
                 CustomLevelFolderInfo? customLevelFolderInfo =
                     await FileSystemCustomLevelProvider.LoadCustomLevelFolderInfoAsync(unzipPath, token) ??
                     throw new InvalidOperationException("Failed to get CustomLevelFolderInfo.");
+                RequireCurrent(context);
 
                 (BeatmapLevel, CustomLevelLoader.LoadedSaveData) tuple =
                     await _customLevelLoader.LoadBeatmapLevelAsync(customLevelFolderInfo.Value, token) ??
                     throw new InvalidOperationException("Failed to get BeatmapLevel.");
+                RequireCurrent(context);
 
                 beatmapLevel = tuple.Item1;
                 _customLevelLoader._loadedBeatmapSaveData[beatmapLevel.levelID] = tuple.Item2;
             }
+
+            RequireCurrent(context);
 
             // just throw that shit into the first pack we find, who cares
             // it just needs a pack for some reason
@@ -323,15 +441,18 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
             {
                 StandardLevelInfoSaveData infoSaveData =
                     await _customLevelLoader.LoadCustomLevelInfoSaveDataAsync(unzipPath, token);
+                RequireCurrent(context);
                 beatmapLevel = await _customLevelLoader.LoadCustomPreviewBeatmapLevelAsync(
                     unzipPath,
                     infoSaveData,
                     token);
+                RequireCurrent(context);
             }
 
             _downloadProgress = 0.99f;
             CustomBeatmapLevel customBeatmapLevel =
                 await _customLevelLoader.LoadCustomBeatmapLevelAsync(beatmapLevel, token);
+            RequireCurrent(context);
             List<IDifficultyBeatmap> difficultyBeatmaps = map.Keys.Select(
                 n =>
                 {
@@ -347,8 +468,10 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
                 }).ToList();
 #endif
 
+            RequireCurrent(context);
             _log.Debug($"Successfully downloaded [{map.Name}] as [{beatmapLevel.levelID}]");
             _downloadProgress = 1;
+            context.Progress.Set(1);
 
             DownloadedMap downloadedMap = new(
                 index,
@@ -361,21 +484,59 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
                 beatmapLevel);
 #endif
             _beatmapLevel = downloadedMap;
-            MapDownloadedBacking?.Invoke(downloadedMap);
-            MapDownloadedOnceBacking?.Invoke(downloadedMap);
+            context.Committed = true;
+            Action<DownloadedMap>? once = MapDownloadedOnceBacking;
             MapDownloadedOnceBacking = null;
+            MapDownloadedBacking?.Invoke(downloadedMap);
+            if (IsPublicationCurrent(context))
+            {
+                once?.Invoke(downloadedMap);
+            }
         }
         catch (OperationCanceledException)
         {
+            throw;
         }
         catch (Exception e)
         {
+            RequireCurrent(context);
             _log.Error($"Error downloading map [{map.Name}]\n{e}");
             _error = "ERROR!";
-            File.Delete(cacheAes.FullName);
-            File.Delete(cacheZip.FullName);
-            _tmp.Purge();
+            if (!context.Committed)
+            {
+                await MapFileWorker.ClearMapCache(_mapFolder, map.Name, token);
+            }
+
             throw;
         }
+    }
+
+    private sealed class MapContext
+    {
+        internal MapContext(int index, Map map, object? listing, CancellationToken token)
+        {
+            Index = index;
+            Map = map;
+            Listing = listing;
+            Token = token;
+        }
+
+        internal int Index { get; }
+
+        internal Map Map { get; }
+
+        internal object? Listing { get; }
+
+        internal CancellationToken Token { get; }
+
+        internal MapFileWorker.Progress Progress { get; } = new();
+
+        internal TaskCompletionSource<bool> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal string? AttemptPath { get; set; }
+
+        internal bool NativeExposed { get; set; }
+
+        internal bool Committed { get; set; }
     }
 }
