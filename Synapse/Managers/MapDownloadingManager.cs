@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -21,6 +21,7 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
         (Path.GetDirectoryName(Application.streamingAssetsPath) ?? throw new InvalidOperationException()) +
         $"{Path.DirectorySeparatorChar}Synapse{Path.DirectorySeparatorChar}Levels";
 
+    private static string? _sessionTempName;
     private readonly SiraLog _log;
     private readonly CustomLevelLoader _customLevelLoader;
     private readonly NetworkManager _networkManager;
@@ -32,7 +33,6 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
     private readonly SongCoreLoader? _songCoreLoader;
     private readonly DirectoryInfo _tmp;
     private readonly Task<MapFileWorker.Result> _initialization;
-    private static string? _sessionTempName;
     private Task? _pipeline;
     private MapContext? _current;
     private bool _disposed;

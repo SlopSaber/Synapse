@@ -15,45 +15,6 @@ internal static class MapFileWorker
     private static readonly Queue<Request> Requests = new();
     private static Task? _physicalTask;
 
-    internal sealed class Progress
-    {
-        private float _value;
-
-        internal float Value => Volatile.Read(ref _value);
-
-        internal void Set(float value) => Volatile.Write(ref _value, value);
-    }
-
-    internal sealed class Result
-    {
-        internal bool Found { get; set; }
-
-        internal List<(string Path, Exception Error)> Warnings { get; } = new();
-    }
-
-    private enum Operation
-    {
-        Initialize,
-        Extract,
-        Purge,
-        Delete,
-        ClearMapCache
-    }
-
-    private sealed class Request
-    {
-        internal Operation Kind;
-        internal string Root = string.Empty;
-        internal string? OldRoot;
-        internal string? Destination;
-        internal string? MapName;
-        internal string? Key;
-        internal MemoryStream? Payload;
-        internal Progress? Progress;
-        internal CancellationToken Token;
-        internal readonly TaskCompletionSource<Result> Completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    }
-
     internal static Task<Result> Initialize(string? oldRoot, string tempRoot, string cacheRoot) => Submit(new Request
     {
         Kind = Operation.Initialize,
@@ -310,5 +271,53 @@ internal static class MapFileWorker
         {
             result.Warnings.Add((root, exception));
         }
+    }
+
+    private enum Operation
+    {
+        Initialize,
+        Extract,
+        Purge,
+        Delete,
+        ClearMapCache
+    }
+
+    internal sealed class Progress
+    {
+        private float _value;
+
+        internal float Value => Volatile.Read(ref _value);
+
+        internal void Set(float value) => Volatile.Write(ref _value, value);
+    }
+
+    internal sealed class Result
+    {
+        internal bool Found { get; set; }
+
+        internal List<(string Path, Exception Error)> Warnings { get; } = new();
+    }
+
+    private sealed class Request
+    {
+        internal Operation Kind { get; set; }
+
+        internal string Root { get; set; } = string.Empty;
+
+        internal string? OldRoot { get; set; }
+
+        internal string? Destination { get; set; }
+
+        internal string? MapName { get; set; }
+
+        internal string? Key { get; set; }
+
+        internal MemoryStream? Payload { get; set; }
+
+        internal Progress? Progress { get; set; }
+
+        internal CancellationToken Token { get; set; }
+
+        internal TaskCompletionSource<Result> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
     }
 }
