@@ -41,7 +41,12 @@ internal class MenuPrefabManager : IDisposable
     private BundleInfo? _bundleInfo;
 
     private bool? _didLoadSucceed;
-    private string _filePath = string.Empty;
+    private string? _pathTitle;
+    private bool _disposed;
+    private long _revision;
+    private long _downloadRevision;
+    private Task? _downloadTask;
+    private Task _physicalTask = Task.CompletedTask;
 
     private GameObject? _prefab;
 
@@ -74,6 +79,11 @@ internal class MenuPrefabManager : IDisposable
     {
         add
         {
+            if (_disposed)
+            {
+                return;
+            }
+
             if (_didLoadSucceed != null)
             {
                 value?.Invoke(_didLoadSucceed.Value);
@@ -94,79 +104,244 @@ internal class MenuPrefabManager : IDisposable
 
     public void Dispose()
     {
+        if (_disposed)
+        {
+            return;
+        }
+
+        _disposed = true;
+        LoadedBacking = null;
         _listingManager.ListingFound -= OnListingFound;
         _networkManager.EliminatedUpdated -= Refresh;
+        Reset(true);
     }
 
     internal void Reset(bool clearPrefab)
     {
+        _revision++;
         _didLoadSucceed = null;
+        GameObject? previous = null;
 
         // ReSharper disable once InvertIf
-        if (clearPrefab && _prefab != null)
+        if (clearPrefab)
         {
-            Object.Destroy(_prefab);
+            previous = _prefab;
             _prefab = null;
-        }
-    }
-
-    internal async Task Download()
-    {
-        if (_prefab != null)
-        {
-            Invoke(true);
-            return;
+            Animator = null;
         }
 
         try
         {
-            if (File.Exists(_filePath))
+            _cancellationTokenManager.Cancel();
+        }
+        finally
+        {
+            if (previous != null)
             {
-                DownloadProgress = 0.99f;
-                await LoadBundle();
-                DownloadProgress = 1;
-                Invoke(true);
+                Object.Destroy(previous);
+            }
+        }
+    }
+
+    internal Task Download()
+    {
+        if (_disposed)
+        {
+            return Task.CompletedTask;
+        }
+
+        if (_prefab != null)
+        {
+            try
+            {
+                Invoke(_revision, true);
+                return Task.CompletedTask;
+            }
+            catch (Exception exception)
+            {
+                TaskCompletionSource<object?> failed = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                if (exception is OperationCanceledException)
+                {
+                    failed.TrySetCanceled();
+                }
+                else
+                {
+                    failed.TrySetException(exception);
+                }
+
+                return failed.Task;
+            }
+        }
+
+        if (_downloadRevision == _revision && _downloadTask is { IsCompleted: false })
+        {
+            return _downloadTask;
+        }
+
+        DownloadRequest request = new(_revision, _pathTitle, _bundleInfo?.Url, _bundleInfo?.Hash);
+        Task previous = _physicalTask;
+        TaskCompletionSource<object?> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource<object?> physical = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        _downloadRevision = _revision;
+        _downloadTask = completion.Task;
+        _physicalTask = physical.Task;
+        _ = CompleteDownload(request, previous, completion, physical);
+        return completion.Task;
+    }
+
+    private async Task CompleteDownload(
+        DownloadRequest request,
+        Task previous,
+        TaskCompletionSource<object?> completion,
+        TaskCompletionSource<object?> physical)
+    {
+        try
+        {
+            await Download(request, previous);
+            completion.TrySetResult(null);
+        }
+        catch (OperationCanceledException)
+        {
+            completion.TrySetCanceled();
+        }
+        catch (Exception exception)
+        {
+            completion.TrySetException(exception);
+        }
+        finally
+        {
+            physical.TrySetResult(null);
+        }
+    }
+
+    private async Task Download(DownloadRequest request, Task previous)
+    {
+        Action<bool>? publishingCallbacks = null;
+        bool publicationStarted = false;
+        try
+        {
+            await previous;
+            if (!IsCurrent(request.Revision))
+            {
                 return;
             }
 
-            string? url = _bundleInfo?.Url;
+            string path = request.Title == null ? string.Empty : await MenuBundleFileWorker.PreparePath(_folder, request.Title);
+            if (!IsCurrent(request.Revision))
+            {
+                return;
+            }
+
+            using IDisposable lease = await MenuBundleFileWorker.Acquire(path);
+            if (!IsCurrent(request.Revision))
+            {
+                return;
+            }
+
+            bool exists = await MenuBundleFileWorker.Exists(path);
+            if (!IsCurrent(request.Revision))
+            {
+                return;
+            }
+
+            if (exists)
+            {
+                DownloadProgress = 0.99f;
+                await LoadBundle(request, path);
+                if (!IsCurrent(request.Revision))
+                {
+                    return;
+                }
+
+                DownloadProgress = 1;
+                InvokeSuccess();
+                return;
+            }
+
+            string? url = request.Url;
             if (string.IsNullOrWhiteSpace(url))
             {
                 _log.Error("No bundle listed");
-                Invoke(true);
+                InvokeSuccess();
                 return;
             }
 
             _log.Debug($"Downloading lobby bundle from [{url}]");
-            using UnityWebRequest www = UnityWebRequest.Get(url);
-            await www.SendAndVerify(n => DownloadProgress = n * 0.98f, _cancellationTokenManager.Reset());
-            byte[] data = www.downloadHandler.data;
-            await Task.Run(() =>
+            if (!IsCurrent(request.Revision))
             {
-                Directory.CreateDirectory(_folder);
-                File.WriteAllBytes(_filePath, data);
-            });
+                return;
+            }
+
+            using UnityWebRequest www = UnityWebRequest.Get(url);
+            System.Threading.CancellationToken token = _cancellationTokenManager.Reset();
+            if (!IsCurrent(request.Revision))
+            {
+                return;
+            }
+
+            await www.SendAndVerify(n =>
+            {
+                if (IsCurrent(request.Revision))
+                {
+                    DownloadProgress = n * 0.98f;
+                }
+            }, token);
+            if (!IsCurrent(request.Revision))
+            {
+                return;
+            }
+
+            byte[] data = www.downloadHandler.data;
+            await MenuBundleFileWorker.Write(_folder, path, data);
+            if (!IsCurrent(request.Revision))
+            {
+                return;
+            }
+
             DownloadProgress = 0.99f;
-            await LoadBundle();
+            await LoadBundle(request, path);
+            if (!IsCurrent(request.Revision))
+            {
+                return;
+            }
+
             DownloadProgress = 1;
-            Invoke(true);
+            InvokeSuccess();
         }
         catch (OperationCanceledException)
         {
         }
         catch (Exception e)
         {
+            if (!IsCurrent(request.Revision))
+            {
+                return;
+            }
+
             _log.Error($"Exception while loading lobby bundle\n{e}");
-            Invoke(false);
+            if (publicationStarted)
+            {
+                Invoke(request.Revision, false, publishingCallbacks);
+            }
+            else
+            {
+                Invoke(request.Revision, false);
+            }
         }
 
         return;
 
-        void Invoke(bool success)
+        void InvokeSuccess()
         {
-            _didLoadSucceed = success;
-            LoadedBacking?.Invoke(success);
+            if (!IsCurrent(request.Revision))
+            {
+                return;
+            }
+
+            publishingCallbacks = LoadedBacking;
             LoadedBacking = null;
+            publicationStarted = true;
+            Invoke(request.Revision, true, publishingCallbacks);
         }
     }
 
@@ -182,47 +357,143 @@ internal class MenuPrefabManager : IDisposable
         Refresh();
     }
 
-    private async Task LoadBundle()
+    private async Task LoadBundle(DownloadRequest request, string path)
     {
-        if (_bundleInfo == null)
+        if (request.Hash == null)
         {
             throw new InvalidOperationException("No bundle info found.");
         }
 
-        AssetBundle? bundle = await MediaExtensions.LoadFromFileAsync(_filePath, _bundleInfo.Hash);
-        if (bundle == null)
+        AssetBundle? bundle = await MediaExtensions.LoadFromFileAsync(path, request.Hash.Value);
+        GameObject? prefab = null;
+        try
         {
-            FileInfo file = new(_filePath);
-            if (file.Exists)
+            if (!IsCurrent(request.Revision))
             {
-                file.Delete();
+                return;
             }
 
-            throw new InvalidOperationException("Failed to load bundle.");
-        }
+            if (bundle == null)
+            {
+                await MenuBundleFileWorker.Delete(path);
+                if (IsCurrent(request.Revision))
+                {
+                    throw new InvalidOperationException("Failed to load bundle.");
+                }
 
-        string[] prefabNames = bundle.GetAllAssetNames();
-        if (prefabNames.Length > 1)
+                return;
+            }
+
+            string[] prefabNames = bundle.GetAllAssetNames();
+            if (prefabNames.Length > 1)
+            {
+                _log.Warn($"More than one asset found in assetbundle, using first [{prefabNames[0]}]");
+            }
+
+            if (!IsCurrent(request.Revision))
+            {
+                return;
+            }
+
+            GameObject obj = await bundle.LoadAssetAsyncTask<GameObject>(prefabNames[0]);
+            if (!IsCurrent(request.Revision))
+            {
+                return;
+            }
+
+            prefab = _instantiator.InstantiatePrefab(obj);
+            if (!IsCurrent(request.Revision))
+            {
+                return;
+            }
+
+            _instantiator.InstantiateComponent<LobbyPrefabAudioController>(prefab);
+            if (!IsCurrent(request.Revision))
+            {
+                return;
+            }
+
+            Animator? animator = prefab.GetComponent<Animator>();
+            bundle.Unload(false);
+            bundle = null;
+            if (!IsCurrent(request.Revision))
+            {
+                return;
+            }
+
+            if (animator == null)
+            {
+                _log.Error("No animator on prefab");
+            }
+
+            if (!IsCurrent(request.Revision))
+            {
+                return;
+            }
+
+            _prefab = prefab;
+            prefab = null;
+            Animator = animator;
+            _prefab.SetActive(_active);
+        }
+        finally
         {
-            _log.Warn($"More than one asset found in assetbundle, using first [{prefabNames[0]}]");
-        }
+            if (prefab != null)
+            {
+                Object.Destroy(prefab);
+            }
 
-        GameObject obj = await bundle.LoadAssetAsyncTask<GameObject>(prefabNames[0]);
-        _prefab = _instantiator.InstantiatePrefab(obj);
-        _instantiator.InstantiateComponent<LobbyPrefabAudioController>(_prefab);
-        Animator = _prefab.GetComponent<Animator>();
-        bundle.Unload(false);
-        if (Animator == null)
+            if (bundle != null)
+            {
+                bundle.Unload(true);
+            }
+        }
+    }
+
+    private bool IsCurrent(long revision)
+    {
+        return !_disposed && revision == _revision;
+    }
+
+    private void Invoke(long revision, bool success)
+    {
+        if (!IsCurrent(revision))
         {
-            _log.Error("No animator on prefab");
+            return;
         }
 
-        _prefab.SetActive(_active);
+        Action<bool>? callbacks = LoadedBacking;
+        LoadedBacking = null;
+        Invoke(revision, success, callbacks);
+    }
+
+    private void Invoke(long revision, bool success, Action<bool>? callbacks)
+    {
+        if (!IsCurrent(revision))
+        {
+            return;
+        }
+
+        _didLoadSucceed = success;
+        if (callbacks == null)
+        {
+            return;
+        }
+
+        foreach (Action<bool> callback in callbacks.GetInvocationList())
+        {
+            if (!IsCurrent(revision))
+            {
+                return;
+            }
+
+            callback(success);
+        }
     }
 
     private void Refresh()
     {
-        if (_lastActive == _active)
+        if (_disposed || _lastActive == _active)
         {
             return;
         }
@@ -264,6 +535,11 @@ internal class MenuPrefabManager : IDisposable
 
     private void OnListingFound(Listing? listing)
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         _lobbyInfo = listing?.Lobby;
         _bundleInfo = _lobbyInfo?.Bundles.FirstOrDefault(b => b.GameVersion.MatchesGameVersion());
         if (_bundleInfo == null)
@@ -278,26 +554,30 @@ internal class MenuPrefabManager : IDisposable
         }
 
         _lastHash = _bundleInfo.Hash;
-
-        _cameraDepthTextureManager.DepthTextureMode = (DepthTextureMode)_lobbyInfo!.DepthTextureMode;
-
+        DepthTextureMode depthTextureMode = (DepthTextureMode)_lobbyInfo!.DepthTextureMode;
+        _pathTitle = listing == null ? "undefined" : listing.Title;
+        long revision = _revision + 1;
         Reset(true);
+        if (!IsCurrent(revision))
+        {
+            return;
+        }
 
-        string listingTitle = listing == null
-            ? "undefined"
-            : new string(
-                listing
-                    .Title.Select(
-                        j =>
-                        {
-                            if (char.IsLetter(j) || char.IsNumber(j))
-                            {
-                                return j;
-                            }
+        _cameraDepthTextureManager.DepthTextureMode = depthTextureMode;
+        if (_pathTitle == null)
+        {
+            throw new ArgumentNullException("source");
+        }
+    }
 
-                            return '_';
-                        })
-                    .ToArray());
-        _filePath = Path.Combine(_folder, listingTitle);
+    private sealed class DownloadRequest(long revision, string? title, string? url, uint? hash)
+    {
+        internal long Revision { get; } = revision;
+
+        internal string? Title { get; } = title;
+
+        internal string? Url { get; } = url;
+
+        internal uint? Hash { get; } = hash;
     }
 }

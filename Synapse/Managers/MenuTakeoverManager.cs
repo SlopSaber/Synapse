@@ -2,6 +2,7 @@
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using JetBrains.Annotations;
 using SiraUtil.Logging;
@@ -35,6 +36,9 @@ internal class MenuTakeoverManager : IDisposable, ITickable
     private uint? _lastHash;
     private GameObject? _prefab;
     private bool _enabled;
+    private bool _disposed;
+    private long _revision;
+    private Task _pipeline = Task.CompletedTask;
 
     private DateTime _startTime;
     private TextMeshPro? _countdownText;
@@ -54,11 +58,9 @@ internal class MenuTakeoverManager : IDisposable, ITickable
         _log = log;
         _config = config;
         _instantiator = instantiator;
-        config.Updated += OnConfigUpdated;
         _listingManager = listingManager;
         _particleHold = particleHold;
         _cancellationTokenManager = cancellationTokenManager;
-        listingManager.ListingFound += OnListingFound;
 
         GameObject? menu = menuEnvironmentManager._data
             .FirstOrDefault(n => n.menuEnvironmentType == MenuEnvironmentManager.MenuEnvironmentType.Default)
@@ -78,6 +80,9 @@ internal class MenuTakeoverManager : IDisposable, ITickable
         {
             _menuLogo = [];
         }
+
+        config.Updated += OnConfigUpdated;
+        listingManager.ListingFound += OnListingFound;
     }
 
     internal bool Enabled
@@ -85,7 +90,7 @@ internal class MenuTakeoverManager : IDisposable, ITickable
         ////get => _enabled;
         set
         {
-            if (_enabled == value)
+            if (_disposed || _enabled == value)
             {
                 return;
             }
@@ -97,7 +102,7 @@ internal class MenuTakeoverManager : IDisposable, ITickable
 
     public void Tick()
     {
-        if (_countdownText == null)
+        if (_disposed || _countdownText == null)
         {
             return;
         }
@@ -114,24 +119,46 @@ internal class MenuTakeoverManager : IDisposable, ITickable
 
     public void Dispose()
     {
-        _listingManager.ListingFound -= OnListingFound;
-    }
-
-    private void Refresh()
-    {
-        bool doEnable = _enabled && !_config.DisableMenuTakeover;
-        if (_prefab == null)
+        if (_disposed)
         {
             return;
         }
 
-        _prefab.SetActive(doEnable);
+        _disposed = true;
+        _config.Updated -= OnConfigUpdated;
+        _listingManager.ListingFound -= OnListingFound;
+        Reset();
+    }
+
+    private void Refresh()
+    {
+        long revision = _revision;
+        GameObject? prefab = _prefab;
+        bool doEnable = _enabled && !_config.DisableMenuTakeover;
+        if (_disposed || prefab == null)
+        {
+            return;
+        }
+
+        prefab.SetActive(doEnable);
+        if (!IsCurrent(revision) || prefab != _prefab || doEnable != (_enabled && !_config.DisableMenuTakeover))
+        {
+            return;
+        }
 
         _particleHold.DustDisabled = doEnable && _disableDust;
 
         foreach (GameObject gameObject in _menuLogo)
         {
-            gameObject.SetActive(!(doEnable && _disableLogo));
+            if (!IsCurrent(revision) || prefab != _prefab || doEnable != (_enabled && !_config.DisableMenuTakeover))
+            {
+                return;
+            }
+
+            if (gameObject != null)
+            {
+                gameObject.SetActive(!(doEnable && _disableLogo));
+            }
         }
     }
 
@@ -140,33 +167,94 @@ internal class MenuTakeoverManager : IDisposable, ITickable
         Refresh();
     }
 
-    private void Reset()
+    private bool IsCurrent(long revision)
     {
-        if (_prefab == null)
-        {
-            return;
-        }
-
-        Object.Destroy(_prefab);
-        _prefab = null;
+        return !_disposed && revision == _revision;
     }
 
-    private async Task Download(string filePath, Listing? listing)
+    private long Reset()
     {
-        if (_prefab != null)
-        {
-            return;
-        }
-
+        long revision = ++_revision;
+        GameObject? prefab = _prefab;
+        _prefab = null;
+        _countdownText = null;
         try
         {
-            if (File.Exists(_takeoverFolder))
+            _cancellationTokenManager.Cancel();
+        }
+        finally
+        {
+            try
             {
-                await LoadBundle(filePath, listing);
+                if (prefab != null)
+                {
+                    Object.Destroy(prefab);
+                }
+            }
+            finally
+            {
+                if (revision == _revision)
+                {
+                    _particleHold.DustDisabled = false;
+                    foreach (GameObject gameObject in _menuLogo)
+                    {
+                        if (revision != _revision)
+                        {
+                            break;
+                        }
+
+                        if (gameObject != null)
+                        {
+                            gameObject.SetActive(true);
+                        }
+                    }
+                }
+            }
+        }
+
+        return revision;
+    }
+
+    private async Task Download(
+        Task predecessor,
+        long revision,
+        string title,
+        string? url,
+        uint hash,
+        string? countdownPath)
+    {
+        try
+        {
+            await predecessor;
+            if (!IsCurrent(revision))
+            {
                 return;
             }
 
-            string? url = _bundleInfo?.Url;
+            string filePath = await MenuBundleFileWorker.PreparePath(_takeoverFolder, title);
+            if (!IsCurrent(revision))
+            {
+                return;
+            }
+
+            using IDisposable lease = await MenuBundleFileWorker.Acquire(filePath);
+            if (!IsCurrent(revision))
+            {
+                return;
+            }
+
+            bool exists = await MenuBundleFileWorker.Exists(_takeoverFolder);
+            if (!IsCurrent(revision))
+            {
+                return;
+            }
+
+            if (exists)
+            {
+                await LoadBundle(filePath, hash, countdownPath, revision);
+                return;
+            }
+
             if (string.IsNullOrWhiteSpace(url))
             {
                 _log.Error("No bundle listed");
@@ -174,68 +262,180 @@ internal class MenuTakeoverManager : IDisposable, ITickable
             }
 
             _log.Debug($"Downloading menu takeover bundle from [{url}]");
-            using UnityWebRequest www = UnityWebRequest.Get(url);
-            await www.SendAndVerify(null, _cancellationTokenManager.Reset());
-            byte[] data = www.downloadHandler.data;
-            await Task.Run(() =>
+            if (!IsCurrent(revision))
             {
-                Directory.CreateDirectory(_takeoverFolder);
-                File.WriteAllBytes(filePath, data);
-            });
-            await LoadBundle(filePath, listing);
+                return;
+            }
+
+            using UnityWebRequest www = UnityWebRequest.Get(url);
+            if (!IsCurrent(revision))
+            {
+                return;
+            }
+
+            CancellationToken token = _cancellationTokenManager.Reset();
+            if (!IsCurrent(revision))
+            {
+                return;
+            }
+
+            await www.SendAndVerify(null, token);
+            if (!IsCurrent(revision))
+            {
+                return;
+            }
+
+            byte[] data = www.downloadHandler.data;
+            await MenuBundleFileWorker.Write(_takeoverFolder, filePath, data);
+            if (!IsCurrent(revision))
+            {
+                return;
+            }
+
+            await LoadBundle(filePath, hash, countdownPath, revision);
         }
         catch (OperationCanceledException)
         {
         }
         catch (Exception e)
         {
-            _log.Error($"Exception while loading menu takeover bundle\n{e}");
+            if (IsCurrent(revision))
+            {
+                _log.Error($"Exception while loading menu takeover bundle\n{e}");
+            }
         }
     }
 
-    private async Task LoadBundle(string filePath, Listing? listing)
+    private async Task CompleteDownload(Task operation, TaskCompletionSource<bool> completion, long revision)
     {
-        if (_bundleInfo == null)
+        try
         {
-            throw new InvalidOperationException("No bundle info found.");
+            await operation;
         }
-
-        AssetBundle? bundle = await MediaExtensions.LoadFromFileAsync(filePath, _bundleInfo.Hash);
-        if (bundle == null)
+        catch (OperationCanceledException)
         {
-            FileInfo file = new(filePath);
-            if (file.Exists)
+        }
+        catch (Exception e)
+        {
+            if (IsCurrent(revision))
             {
-                file.Delete();
+                try
+                {
+                    _log.Error($"Exception while loading menu takeover bundle\n{e}");
+                }
+                catch
+                {
+                }
+            }
+        }
+        finally
+        {
+            completion.TrySetResult(true);
+        }
+    }
+
+    private async Task LoadBundle(string filePath, uint hash, string? countdownPath, long revision)
+    {
+        AssetBundle? bundle = null;
+        GameObject? stagedPrefab = null;
+        try
+        {
+            bundle = await MediaExtensions.LoadFromFileAsync(filePath, hash);
+            if (!IsCurrent(revision))
+            {
+                return;
             }
 
-            throw new InvalidOperationException("Failed to load bundle.");
-        }
+            if (bundle == null)
+            {
+                await MenuBundleFileWorker.Delete(filePath);
+                if (!IsCurrent(revision))
+                {
+                    return;
+                }
 
-        string[] prefabNames = bundle.GetAllAssetNames();
-        if (prefabNames.Length > 1)
+                throw new InvalidOperationException("Failed to load bundle.");
+            }
+
+            string[] prefabNames = bundle.GetAllAssetNames();
+            if (prefabNames.Length > 1)
+            {
+                _log.Warn($"More than one asset found in assetbundle, using first [{prefabNames[0]}]");
+            }
+
+            if (!IsCurrent(revision))
+            {
+                return;
+            }
+
+            GameObject obj = await bundle.LoadAssetAsyncTask<GameObject>(prefabNames[0]);
+            if (!IsCurrent(revision))
+            {
+                return;
+            }
+
+            stagedPrefab = _instantiator.InstantiatePrefab(obj);
+            if (!IsCurrent(revision))
+            {
+                return;
+            }
+
+            _instantiator.InstantiateComponent<TakeoverPrefabAudioController>(stagedPrefab);
+            if (!IsCurrent(revision))
+            {
+                return;
+            }
+
+            TextMeshPro? countdown = null;
+            if (!string.IsNullOrEmpty(countdownPath))
+            {
+                countdown = stagedPrefab.transform.Find(countdownPath).GetComponent<TextMeshPro>();
+            }
+
+            bundle.Unload(false);
+            bundle = null;
+            if (!IsCurrent(revision))
+            {
+                return;
+            }
+
+            stagedPrefab.SetActive(false);
+            if (!IsCurrent(revision))
+            {
+                return;
+            }
+
+            _prefab = stagedPrefab;
+            stagedPrefab = null;
+            _countdownText = countdown;
+            Refresh();
+        }
+        finally
         {
-            _log.Warn($"More than one asset found in assetbundle, using first [{prefabNames[0]}]");
+            try
+            {
+                if (stagedPrefab != null)
+                {
+                    Object.Destroy(stagedPrefab);
+                }
+            }
+            finally
+            {
+                if (bundle != null)
+                {
+                    bundle.Unload(true);
+                }
+            }
         }
-
-        GameObject obj = await bundle.LoadAssetAsyncTask<GameObject>(prefabNames[0]);
-        _prefab = _instantiator.InstantiatePrefab(obj);
-        _instantiator.InstantiateComponent<TakeoverPrefabAudioController>(_prefab);
-
-        string? countdownPath = listing?.Takeover.CountdownTMP;
-        if (!string.IsNullOrEmpty(countdownPath))
-        {
-            _countdownText = _prefab.transform.Find(countdownPath).GetComponent<TextMeshPro>();
-        }
-
-        bundle.Unload(false);
-
-        _prefab.SetActive(false);
-        Refresh();
     }
 
     private void OnListingFound(Listing? listing)
     {
+        if (_disposed)
+        {
+            return;
+        }
+
         _bundleInfo = listing?.Takeover.Bundles.FirstOrDefault(b => b.GameVersion.MatchesGameVersion());
         if (_bundleInfo == null)
         {
@@ -255,23 +455,25 @@ internal class MenuTakeoverManager : IDisposable, ITickable
 
         _lastHash = _bundleInfo.Hash;
 
-        Reset();
+        string title = listing == null ? "undefined" : listing.Title;
+        string? url = _bundleInfo.Url;
+        uint hash = _bundleInfo.Hash;
+        string? countdownPath = listing?.Takeover.CountdownTMP;
+        long revision = Reset();
+        if (!IsCurrent(revision))
+        {
+            return;
+        }
 
-        string listingTitle = listing == null
-            ? "undefined"
-            : new string(
-                listing
-                    .Title.Select(
-                        j =>
-                        {
-                            if (char.IsLetter(j) || char.IsNumber(j))
-                            {
-                                return j;
-                            }
+        if (title == null)
+        {
+            throw new ArgumentNullException("source");
+        }
 
-                            return '_';
-                        })
-                    .ToArray());
-        _ = Download(Path.Combine(_takeoverFolder, listingTitle), listing);
+        Task predecessor = _pipeline;
+        TaskCompletionSource<bool> completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        _pipeline = completion.Task;
+        Task operation = Download(predecessor, revision, title, url, hash, countdownPath);
+        _ = CompleteDownload(operation, completion, revision);
     }
 }
