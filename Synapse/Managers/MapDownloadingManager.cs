@@ -94,12 +94,20 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
     {
         add
         {
-            if (_beatmapLevel.HasValue)
+            if (_disposed)
+            {
+                return;
+            }
+
+            if (_beatmapLevel.HasValue && _current is { Committed: true } && IsPublicationCurrent(_current))
             {
                 value?.Invoke(_beatmapLevel.Value);
             }
 
-            MapDownloadedBacking += value;
+            if (!_disposed)
+            {
+                MapDownloadedBacking += value;
+            }
         }
 
         remove => MapDownloadedBacking -= value;
@@ -109,7 +117,12 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
     {
         add
         {
-            if (_beatmapLevel.HasValue)
+            if (_disposed)
+            {
+                return;
+            }
+
+            if (_beatmapLevel.HasValue && _current is { Committed: true } && IsPublicationCurrent(_current))
             {
                 value?.Invoke(_beatmapLevel.Value);
                 return;
@@ -276,6 +289,11 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
                 }
                 catch
                 {
+                    if (context.Committed)
+                    {
+                        return;
+                    }
+
                     RequireCurrent(context);
                     await Task.Delay((++retry) * 1000, context.Token);
                 }
@@ -294,8 +312,14 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
         }
         finally
         {
-            await CleanupAttempt(context);
-            context.Completion.TrySetResult(true);
+            try
+            {
+                await CleanupAttempt(context);
+            }
+            finally
+            {
+                context.Completion.TrySetResult(true);
+            }
         }
     }
 
@@ -324,6 +348,7 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
         RequireCurrent(context);
         int index = context.Index;
         Map map = context.Map;
+        string name = map.Name;
         CancellationToken token = context.Token;
         _error = null;
         _lastProgress = 0;
@@ -338,16 +363,17 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
                 map.Downloads.FirstOrDefault(n => n.GameVersion.MatchesGameVersion()) ??
                 throw new InvalidOperationException($"No download found for game version [{Plugin.GameVersion}].");
             string url = download.Url;
-            string name = map.Name;
+            string hash = download.Hash;
             string? key = download.Key;
             MapFileWorker.Result files = await MapFileWorker.Extract(_mapFolder, name, unzipPath, key, null, context.Progress, token);
             RequireCurrent(context);
             if (!files.Found)
             {
                 _log.Debug($"Attempting to download [{map.Name}] from [{url}]");
+                RequireCurrent(context);
                 MemoryStream stream = await MediaExtensions.DownloadHash(
                     url,
-                    download.Hash,
+                    hash,
                     value =>
                     {
                         if (IsCurrent(context))
@@ -376,11 +402,11 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
 
             _downloadProgress = 0.98f;
             context.Progress.Set(0.98f);
-            context.NativeExposed = true;
 #if !PRE_V1_37_1
             BeatmapLevel beatmapLevel;
             if (_songCoreLoader != null)
             {
+                context.NativeExposed = true;
                 beatmapLevel = _songCoreLoader.Load(unzipPath);
             }
             else
@@ -393,6 +419,7 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
                 (BeatmapLevel, CustomLevelLoader.LoadedSaveData) tuple =
                     await _customLevelLoader.LoadBeatmapLevelAsync(customLevelFolderInfo.Value, token) ??
                     throw new InvalidOperationException("Failed to get BeatmapLevel.");
+                context.NativeExposed = true;
                 RequireCurrent(context);
 
                 beatmapLevel = tuple.Item1;
@@ -435,6 +462,7 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
             CustomPreviewBeatmapLevel beatmapLevel;
             if (_songCoreLoader != null)
             {
+                context.NativeExposed = true;
                 beatmapLevel = _songCoreLoader.Load(unzipPath);
             }
             else
@@ -446,6 +474,7 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
                     unzipPath,
                     infoSaveData,
                     token);
+                context.NativeExposed = true;
                 RequireCurrent(context);
             }
 
@@ -470,6 +499,7 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
 
             RequireCurrent(context);
             _log.Debug($"Successfully downloaded [{map.Name}] as [{beatmapLevel.levelID}]");
+            RequireCurrent(context);
             _downloadProgress = 1;
             context.Progress.Set(1);
 
@@ -501,10 +531,11 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
         {
             RequireCurrent(context);
             _log.Error($"Error downloading map [{map.Name}]\n{e}");
+            RequireCurrent(context);
             _error = "ERROR!";
             if (!context.Committed)
             {
-                await MapFileWorker.ClearMapCache(_mapFolder, map.Name, token);
+                await MapFileWorker.ClearMapCache(_mapFolder, name, token);
             }
 
             throw;
