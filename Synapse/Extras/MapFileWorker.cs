@@ -15,6 +15,15 @@ internal static class MapFileWorker
     private static readonly Queue<Request> Requests = new();
     private static Task? _physicalTask;
 
+    private enum Operation
+    {
+        Initialize,
+        Extract,
+        Purge,
+        Delete,
+        ClearMapCache
+    }
+
     internal static Task<Result> Initialize(string? oldRoot, string tempRoot, string cacheRoot) => Submit(new Request
     {
         Kind = Operation.Initialize,
@@ -271,15 +280,6 @@ internal static class MapFileWorker
         {
             result.Warnings.Add((root, exception));
         }
-    }
-
-    private enum Operation
-    {
-        Initialize,
-        Extract,
-        Purge,
-        Delete,
-        ClearMapCache
     }
 
     internal sealed class Progress
