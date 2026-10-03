@@ -99,14 +99,11 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
                 return;
             }
 
-            if (_beatmapLevel.HasValue && _current is { Committed: true } && IsPublicationCurrent(_current))
+            MapDownloadedBacking += value;
+            MapContext? context = _current;
+            if (_beatmapLevel.HasValue && context is { Committed: true } && IsPublicationCurrent(context))
             {
-                value?.Invoke(_beatmapLevel.Value);
-            }
-
-            if (!_disposed)
-            {
-                MapDownloadedBacking += value;
+                Publish(value, _beatmapLevel.Value, context);
             }
         }
 
@@ -122,9 +119,10 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
                 return;
             }
 
-            if (_beatmapLevel.HasValue && _current is { Committed: true } && IsPublicationCurrent(_current))
+            MapContext? context = _current;
+            if (_beatmapLevel.HasValue && context is { Committed: true } && IsPublicationCurrent(context))
             {
-                value?.Invoke(_beatmapLevel.Value);
+                Publish(value, _beatmapLevel.Value, context);
                 return;
             }
 
@@ -251,6 +249,24 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
 
     private bool IsPublicationCurrent(MapContext context) => !_disposed && ReferenceEquals(_current, context) &&
         ReferenceEquals(_listingManager.Listing, context.Listing);
+
+    private void Publish(Action<DownloadedMap>? handlers, DownloadedMap map, MapContext context)
+    {
+        if (handlers == null)
+        {
+            return;
+        }
+
+        foreach (Action<DownloadedMap> handler in handlers.GetInvocationList())
+        {
+            if (!IsPublicationCurrent(context))
+            {
+                return;
+            }
+
+            handler(map);
+        }
+    }
 
     private void RequireCurrent(MapContext context)
     {
@@ -517,11 +533,8 @@ internal sealed class MapDownloadingManager : IDisposable, ITickable
             context.Committed = true;
             Action<DownloadedMap>? once = MapDownloadedOnceBacking;
             MapDownloadedOnceBacking = null;
-            MapDownloadedBacking?.Invoke(downloadedMap);
-            if (IsPublicationCurrent(context))
-            {
-                once?.Invoke(downloadedMap);
-            }
+            Publish(MapDownloadedBacking, downloadedMap, context);
+            Publish(once, downloadedMap, context);
         }
         catch (OperationCanceledException)
         {

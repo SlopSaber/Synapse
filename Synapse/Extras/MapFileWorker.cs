@@ -196,7 +196,7 @@ internal static class MapFileWorker
                 string cachePath = CachePath(request.Root, request.MapName!);
                 string aesPath = cachePath + ".aes";
                 string zipPath = cachePath + ".zip";
-                if (payload != null)
+                if (payload != null && !File.Exists(aesPath) && !File.Exists(zipPath))
                 {
                     using FileStream output = new(string.IsNullOrEmpty(request.Key) ? zipPath : aesPath, FileMode.CreateNew);
                     payload.CopyTo(output);
