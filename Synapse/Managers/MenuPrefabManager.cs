@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
@@ -189,6 +189,12 @@ internal class MenuPrefabManager : IDisposable
         return completion.Task;
     }
 
+    internal void Show()
+    {
+        _active = true;
+        Refresh();
+    }
+
     private async Task CompleteDownload(
         DownloadRequest request,
         Task previous,
@@ -279,13 +285,15 @@ internal class MenuPrefabManager : IDisposable
                 return;
             }
 
-            await www.SendAndVerify(n =>
-            {
-                if (IsCurrent(request.Revision))
+            await www.SendAndVerify(
+                n =>
                 {
-                    DownloadProgress = n * 0.98f;
-                }
-            }, token);
+                    if (IsCurrent(request.Revision))
+                    {
+                        DownloadProgress = n * 0.98f;
+                    }
+                },
+                token);
             if (!IsCurrent(request.Revision))
             {
                 return;
@@ -348,12 +356,6 @@ internal class MenuPrefabManager : IDisposable
     internal void Hide()
     {
         _active = false;
-        Refresh();
-    }
-
-    internal void Show()
-    {
-        _active = true;
         Refresh();
     }
 

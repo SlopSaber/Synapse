@@ -13,6 +13,13 @@ internal static class MenuBundleFileWorker
     private static readonly Dictionary<string, LeaseEntry> Leases = new(
         Path.DirectorySeparatorChar == '\\' ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
 
+    private enum Operation
+    {
+        Exists,
+        Write,
+        Delete
+    }
+
     internal static Task<string> PreparePath(string folder, string title)
     {
         return Task.Factory.StartNew(
@@ -95,13 +102,6 @@ internal static class MenuBundleFileWorker
             default:
                 throw new InvalidOperationException();
         }
-    }
-
-    private enum Operation
-    {
-        Exists,
-        Write,
-        Delete
     }
 
     private sealed class PathRequest(string folder, string title)
