@@ -4,6 +4,7 @@ using IPA;
 using IPA.Config.Stores;
 using JetBrains.Annotations;
 using SiraUtil.Zenject;
+using Synapse.Extras;
 using Synapse.Installers;
 using UnityEngine;
 using Logger = IPA.Logging.Logger;
@@ -64,6 +65,10 @@ internal class Plugin
     public void OnEnable()
     {
         _harmonyInstance.PatchAll(typeof(Plugin).Assembly);
+        if (GameVersion == "1.45.2")
+        {
+            EmbeddedSpriteResourceBytes.Prepare(typeof(Plugin).Assembly);
+        }
     }
 
     [UsedImplicitly]

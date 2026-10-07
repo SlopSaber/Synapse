@@ -99,6 +99,13 @@ internal static class MediaExtensions
 
     internal static Sprite GetEmbeddedResourceSprite(string path)
     {
+        if (EmbeddedSpriteResourceBytes.TryGet(path, out byte[] preparedBytes))
+        {
+            Texture2D preparedTexture = new(2, 2);
+            preparedTexture.LoadImage(preparedBytes);
+            return preparedTexture.GetSprite();
+        }
+
         using Stream stream =
             typeof(MediaExtensions).Assembly.GetManifestResourceStream(path) ?? throw new InvalidOperationException();
         using MemoryStream memStream = new();

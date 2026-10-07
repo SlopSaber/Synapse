@@ -24,6 +24,18 @@ internal static class CountdownFileWorker
         return request.Completion.Task;
     }
 
+    internal static Task<byte[]?> ReadResource(Assembly assembly, string resourceName)
+    {
+        Request request = new(assembly, resourceName);
+        lock (Gate)
+        {
+            Requests.Enqueue(request);
+            StartWorker();
+        }
+
+        return request.BytesCompletion!.Task;
+    }
+
     private static void StartWorker()
     {
         if (_physicalTask == null && Requests.Count != 0)
@@ -62,13 +74,36 @@ internal static class CountdownFileWorker
 
             try
             {
-                request.Completion.TrySetResult(Process(request));
+                if (request.BytesCompletion != null)
+                {
+                    request.BytesCompletion.TrySetResult(ReadBytes(request));
+                }
+                else
+                {
+                    request.Completion.TrySetResult(Process(request));
+                }
             }
             catch (Exception exception)
             {
-                request.Completion.TrySetException(exception);
+                if (request.BytesCompletion != null)
+                {
+                    request.BytesCompletion.TrySetResult(null);
+                }
+                else
+                {
+                    request.Completion.TrySetException(exception);
+                }
             }
         }
+    }
+
+    private static byte[] ReadBytes(Request request)
+    {
+        using Stream resource = request.Assembly.GetManifestResourceStream(request.ResourceName) ??
+                                throw new InvalidOperationException();
+        using MemoryStream bytes = new();
+        resource.CopyTo(bytes);
+        return bytes.ToArray();
     }
 
     private static string Process(Request request)
@@ -88,6 +123,12 @@ internal static class CountdownFileWorker
 
     private sealed class Request
     {
+        internal Request(Assembly assembly, string resourceName)
+            : this(assembly, resourceName, string.Empty, string.Empty)
+        {
+            BytesCompletion = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+
         internal Request(Assembly assembly, string resourceName, string folder, string fileName)
         {
             Assembly = assembly;
@@ -105,5 +146,7 @@ internal static class CountdownFileWorker
         internal string FileName { get; }
 
         internal TaskCompletionSource<string> Completion { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        internal TaskCompletionSource<byte[]?>? BytesCompletion { get; }
     }
 }
